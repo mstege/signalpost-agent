@@ -44,6 +44,7 @@ class Work:
         self.terminal = "completed"
         self.requests = 0
         self.previous: dict | None = None
+        self.research_ms = 0
 
 
 def research_company(org: str, *, fetcher: Fetcher, bulk: BulkRegistry | None, previous: dict | None, budget_seconds: float,
@@ -76,12 +77,14 @@ def research_company(org: str, *, fetcher: Fetcher, bulk: BulkRegistry | None, p
     if time.monotonic() > deadline and work.terminal == "completed":
         work.terminal = "partial"
     work.requests = getattr(fetcher, "requests", 0)
+    work.research_ms = int((time.monotonic() - work.started) * 1000)
     return work
 
 
 def finalize_company(work: Work, *, run_id: str, nav: NavJobIndex | None, deadline: float) -> dict:
     """Phase 2: job-feed matching (needs the shared NAV index), refresh diff, synthesis and envelope."""
     ledger, ctx = work.ledger, work.ctx
+    final_started = time.monotonic()
     if nav is not None and ctx.get("entity"):
         try:
             research_jobs(ctx, nav, ledger, deadline)
@@ -95,8 +98,10 @@ def finalize_company(work: Work, *, run_id: str, nav: NavJobIndex | None, deadli
         synthesis = {"summary": "", "sentences": [], "error": f"{type(exc).__name__}: {exc}"}
     return assemble(work.org, ledger, ctx, run_id=run_id, started=work.started_wall, completed=completed_wall, terminal=work.terminal,
                     synthesis=synthesis, changes=changes, refresh_meta=refresh_meta,
-                    operations={"requests": work.requests, "runtime_ms": int((time.monotonic() - work.started) * 1000),
-                                "third_party_cost_usd": 0.0})
+                    operations={"requests": work.requests,
+                                "runtime_ms": work.research_ms + int((time.monotonic() - final_started) * 1000),
+                                "third_party_cost_usd": 0.0,
+                                "note": "runtime_ms counts this company's own work; the shared NAV job index is built once per batch"})
 
 
 def family_states(ledger: Ledger, has_website: bool, terminal: str) -> dict:
