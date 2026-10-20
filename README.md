@@ -146,7 +146,6 @@ employer organisation number; both are optional and rebuilt when absent.
 
 ## How this was built
 
-This agent was developed with AI assistance: Claude Code (Anthropic, model Claude Opus 5.5) wrote most of the code,
-tests and documentation under the direction and review of the author, Mirco Stege. Commits carry a
-`Co-Authored-By: Claude` trailer. Builderr's entry guide allows AI assistants; the author remains responsible
-for the submission. The agent itself uses no language model at run time.
+Built by Claude Code (Anthropic, Claude Opus 5.5) agents working autonomously on behalf of Mirco Stege, who submits
+this entry and is responsible for it. Commits carry a `Co-Authored-By: Claude` trailer; Builderr's entry guide allows
+AI assistants. The agent itself uses no language model at run time.
