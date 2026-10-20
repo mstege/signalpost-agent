@@ -143,3 +143,10 @@ employer organisation number; both are optional and rebuilt when absent.
 - People on websites are extracted with conservative name/title patterns; registry roles remain
   the authoritative leadership record.
 - No reviews, ratings, sentiment or third-party news: no permitted, licensed source was used.
+
+## How this was built
+
+This agent was developed with AI assistance: Claude Code (Anthropic, model Claude Opus 5.5) wrote most of the code,
+tests and documentation under the direction and review of the author, Mirco Stege. Commits carry a
+`Co-Authored-By: Claude` trailer. Builderr's entry guide allows AI assistants; the author remains responsible
+for the submission. The agent itself uses no language model at run time.

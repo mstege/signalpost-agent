@@ -108,7 +108,9 @@ def check_url(url: str) -> str:
         if not ip.is_global:
             raise UrlPolicyError(f"non-public address for {host}")
     netloc = host_idna if parts.port is None else f"{host_idna}:{parts.port}"
-    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, ""))
+    path = urllib.parse.quote(parts.path or "/", safe="/%:@!$&'()*+,;=-._~")
+    query = urllib.parse.quote(parts.query, safe="=&%:@!$'()*+,;/?-._~")
+    return urllib.parse.urlunsplit((parts.scheme, netloc, path, query, ""))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -225,7 +227,7 @@ class Fetcher:
                 raw = b""
             self._count(len(raw))
             return Snapshot(url, url, exc.code, retrieved_at, content_sha256=sha256(raw), error=f"HTTP {exc.code}")
-        except (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError, OSError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - any transport problem becomes a recorded fetch error
             reason = getattr(exc, "reason", exc)
             return Snapshot(url, url, 0, retrieved_at, error=f"{type(exc).__name__}: {str(reason)[:120]}")
         finally:

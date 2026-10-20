@@ -62,6 +62,11 @@ class UrlPolicyTest(unittest.TestCase):
                 check_url(url)
 
 
+class UrlEncodingTest(unittest.TestCase):
+    def test_spaces_in_path_are_encoded(self):
+        self.assertTrue(check_url("https://www.brreg.no/Om oss").endswith("/Om%20oss"))
+
+
 class IdentityGateTest(unittest.TestCase):
     def test_orgnr_on_page_is_exact(self):
         v = visit("https://sandneselektriske.no/", "<html lang='no'><body>Sandnes Elektriske AS · Org.nr. 810 034 882</body></html>")

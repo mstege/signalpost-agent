@@ -160,12 +160,22 @@ def main(argv: list[str] | None = None) -> int:
         works.setdefault(org, failed_envelope(org, run_id, "company research did not finish within the batch time budget", previous.get(org)))
     if nav is not None:
         nav.ready.wait(timeout=max(0.0, global_deadline - 45 - time.monotonic()))
-    fin_futures = {pool.submit(finalize, works[org]): org for org in pending}
+    # Finalisation runs in its own pool so it never queues behind research threads that are still busy.
+    fin_pool = ThreadPoolExecutor(max_workers=max(1, args.workers))
+    fin_futures = {fin_pool.submit(finalize, works[org]): org for org in pending}
+    finished, _ = wait(set(fin_futures), timeout=max(1.0, global_deadline + 10 - time.monotonic()))
     for fut, org in fin_futures.items():
-        try:
-            done[org] = fut.result(timeout=max(1.0, global_deadline + 10 - time.monotonic()))
-        except Exception as exc:  # noqa: BLE001
-            done[org] = failed_envelope(org, run_id, f"finalisation failed: {type(exc).__name__}: {exc}", previous.get(org))
+        if fut in finished:
+            try:
+                done[org] = fut.result()
+                continue
+            except Exception as exc:  # noqa: BLE001
+                reason = f"finalisation failed: {type(exc).__name__}: {exc}"
+        else:
+            fut.cancel()
+            reason = "finalisation did not finish within the batch time budget"
+        done[org] = failed_envelope(org, run_id, reason, previous.get(org))
+    fin_pool.shutdown(wait=False, cancel_futures=True)
     pool.shutdown(wait=False, cancel_futures=True)
 
     envelopes = [done[o] for o in orgs]
