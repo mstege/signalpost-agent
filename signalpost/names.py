@@ -72,7 +72,7 @@ def distinctive(legal_name: str) -> bool:
     return bool(toks) and (len(toks) >= 2 or len(toks[0]) >= 5)
 
 
-def domain_slugs(legal_name: str) -> list[str]:
+def domain_slugs(legal_name: str, trim_generic: bool = True) -> list[str]:
     core = core_name(legal_name)
     out: list[str] = []
     for mode in (0, 1, 2):
@@ -83,7 +83,7 @@ def domain_slugs(legal_name: str) -> list[str]:
             continue
         variants = ["".join(words), "-".join(words)]
         trimmed = [w for w in words if w not in GENERIC]
-        if trimmed and trimmed != words:
+        if trim_generic and trimmed and trimmed != words:
             variants += ["".join(trimmed), "-".join(trimmed)]
         if "og" in words:
             variants.append("".join(w for w in words if w != "og"))

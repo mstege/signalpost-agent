@@ -195,7 +195,9 @@ def other_entities(ctx: dict, page: Page) -> list[str]:
                 continue
             # keep the trailing 1-4 words, which is where the entity name sits in running text
             candidate = " ".join(words[-4:]).lower()
-            if any(o and (o in candidate or candidate.endswith(o) or o.endswith(candidate)) for o in ours):
+            squash = re.sub(r"[^a-z0-9æøå]", "", candidate)
+            if any(o and (o in candidate or candidate.endswith(o) or o.endswith(candidate)) for o in ours) or \
+                    any(len(sq) >= 4 and (sq in squash or squash.endswith(sq)) for sq in (re.sub(r"[^a-z0-9æøå]", "", o) for o in ours)):
                 continue
             if candidate in ("org", "org.nr", "mva", "orgnr") or re.fullmatch(r"[\d\s.]+", candidate):
                 continue
@@ -227,6 +229,8 @@ def _proof(ctx: dict, visit: SiteVisit, origin: str, candidate_host: str) -> dic
     final_host = urllib.parse.urlsplit(visit.snap.final_url or "").hostname or ""
     same_domain = registered_domain(final_host) == registered_domain(candidate_host)
     named = name_in_text(legal, hay + " " + page.title) or any(name_in_text(f, hay + " " + page.title) for f in ctx.get("former_names") or [])
+    if address_name(legal):
+        named = False  # a street address used as company name ("Lyseveien 16 AS") proves nothing on a page
     m = orgnr_regex(org).search(hay)
     if m:
         others = orgnrs_in(hay) - {org} - {s.get("organisation_number") for s in ctx.get("subunits") or []}
@@ -243,6 +247,10 @@ def _proof(ctx: dict, visit: SiteVisit, origin: str, candidate_host: str) -> dic
     others = other_entities(ctx, page)
     if not named and others:
         return {"level": "site_names_other_entity", "span": "; ".join(others), "named": False, "reject": True, "others": others}
+    if others and not _owner_zone_named(ctx, page) and not _path_named(ctx, visit.snap.final_url or ""):
+        # the title, site name or footer identify another legal entity and ours appears only in running text:
+        # a group, owner, manager or service provider site
+        return {"level": "site_owned_by_other_entity", "span": "; ".join(others), "named": named, "reject": True, "others": others}
     managed = _managed_entity(ctx)
     if managed and not domain_named:
         return {"level": "managed_entity_without_own_domain", "span": final_host, "named": named, "reject": True}
@@ -264,7 +272,8 @@ def _proof(ctx: dict, visit: SiteVisit, origin: str, candidate_host: str) -> dic
                 return {"level": "registry_email_on_page", "span": f"mailto link {mail_links[0]}", "named": named}
         elif named or domain_named:
             return {"level": "registry_email_on_page", "span": snippet(text, idx, idx + len(email)), "named": named}
-    if named and same_domain and origin in ("registry_website", "registry_email_domain", "subunit_website", "wikidata_website"):
+    if named and same_domain and origin in ("registry_website", "registry_email_domain", "subunit_website", "wikidata_website") and \
+            (domain_named or _owner_zone_named(ctx, page)):
         span = _name_span(legal, hay + " " + page.title)
         return {"level": f"{origin}_with_legal_name", "span": span, "named": True}
     if same_domain and (named or domain_named) and origin in ("registry_website", "registry_email_domain", "wikidata_website"):
@@ -284,7 +293,9 @@ def _proof(ctx: dict, visit: SiteVisit, origin: str, candidate_host: str) -> dic
         if street_hit and post_hit:
             i = low.find(street)
             return {"level": "legal_name_and_registered_address_on_page", "span": snippet(text, i, i + len(street)), "named": True}
-    if named and same_domain and domain_named and origin == "name_guess" and distinctive(legal) and not others:
+    full_slugs = {re.sub(r"[^a-z0-9æøå]", "", x) for x in domain_slugs(legal, trim_generic=False)}
+    foreign_orgnrs = orgnrs_in(hay) - {org} - {s.get("organisation_number") for s in ctx.get("subunits") or []}
+    if named and same_domain and label in full_slugs and origin == "name_guess" and distinctive(legal) and not others and not foreign_orgnrs:
         flat = " ".join((hay + " " + page.title).split())
         full = full_name_in_text(legal, flat)
         if full is not None:
@@ -314,9 +325,34 @@ def _former_name_taken(ctx: dict, fetcher: Fetcher) -> bool:
     return False
 
 
+ADDRESS_NAME = re.compile(r"\b[\wæøåÆØÅ.]*(?:gate|gata|gaten|veien|vegen|vei|veg|allé|alle|plass|torg|bakken|stien|brygge)\s+\d+", re.I)
+
+
+def address_name(legal_name: str) -> bool:
+    """True when the company name is a street address, typical for property-holding companies."""
+    return bool(ADDRESS_NAME.search(core_name(legal_name)))
+
+
+COPYRIGHT_RE = re.compile(r"(?:©|&copy;|\(c\)|copyright)[^|\n]{0,120}", re.I)
+
+
+def _owner_zone_named(ctx: dict, page: Page) -> bool:
+    """Our name where a site states its owner: title, site name, JSON-LD organisation name, copyright line."""
+    ld_names = [str(item.get(k)) for item in page.jsonld for k in ("name", "legalName") if item.get(k)
+                and str(item.get("@type", "")).lower() in ("organization", "localbusiness", "corporation", "website", "")]
+    zones = " ".join([page.title, page.meta.get("og:site_name", "")] + ld_names + [m.group(0) for m in COPYRIGHT_RE.finditer(page.flat)])
+    return any(name_in_text(n, zones) for n in [ctx.get("legal_name") or ""] + (ctx.get("former_names") or []) if n)
+
+
+def _path_named(ctx: dict, url: str) -> bool:
+    """A dealer or member page on a chain site whose path carries the company's own name."""
+    path = re.sub(r"[^a-z0-9æøå]", "", urllib.parse.unquote(urllib.parse.urlsplit(url).path.lower()))
+    return any(len(sl) >= 5 and sl in path for sl in {re.sub(r"[^a-z0-9æøå]", "", x) for x in domain_slugs(ctx.get("legal_name") or "", trim_generic=False)})
+
+
 def _managed_entity(ctx: dict) -> bool:
-    """Housing cooperatives, co-ownerships, foundations and funds are usually run from a manager's domain."""
-    return ctx.get("legal_form") in ("BRL", "BBL", "ESEK", "STI", "SAM", "PK") or \
+    """Housing cooperatives, co-ownerships, foundations, funds and address-named property companies are usually run from a manager's domain."""
+    return address_name(ctx.get("legal_name") or "") or ctx.get("legal_form") in ("BRL", "BBL", "ESEK", "STI", "SAM", "PK") or \
         bool(re.search(r"\b(borettslag|sameie|sameiet|stiftelse|stiftelsen|gavefond|legat|boligbyggelag)\b", ctx.get("legal_name") or "", re.I))
 
 
@@ -440,6 +476,11 @@ def discover_and_verify(ctx: dict, fetcher: Fetcher, ledger: Ledger, deadline: f
         final = visit.snap.final_url or cand["url"]
         parts = urllib.parse.urlsplit(final)
         home = f"{parts.scheme}://{parts.hostname}/"
+        if registered_domain(parts.hostname or "") != registered_domain(host) and _path_named(ctx, final):
+            home = f"{parts.scheme}://{parts.hostname}{parts.path}"  # own page on a chain or platform site, not the chain's homepage
+            ctx["website_relation"] = "page_on_chain_site"
+            for family in WEBSITE_DEPENDENT:
+                ledger.mark(family, "not_available", "the verified page sits on a chain or platform site; the rest of that site is not attributed to this entity")
         ev = ledger.add_evidence(visit_proof.snap, source_class="company_owned_website", span=proof["span"],
                                  method=f"identity_proof:{proof['level']}")
         support = [ev]
@@ -457,7 +498,7 @@ def discover_and_verify(ctx: dict, fetcher: Fetcher, ledger: Ledger, deadline: f
         ledger.claim("web_presence", "official_website", home, support, confidence=confidence, key="official_website",
                      note=f"discovered via {cand['origin']}; identity proof: {proof['level']}")
         return {"home": home, "domain": registered_domain(parts.hostname or ""), "visits": pages_checked, "origin": cand["origin"],
-                "proof": proof["level"]}
+                "proof": proof["level"], "crawl": ctx.get("website_relation") != "page_on_chain_site"}
     checked = [c["url"] for c in ctx["website_candidates"]]
     if _publish_registry_declared(ctx, ledger):
         return None
@@ -472,7 +513,8 @@ def discover_and_verify(ctx: dict, fetcher: Fetcher, ledger: Ledger, deadline: f
     return None
 
 
-REGISTRY_DECLARED_OK = ("blocked_by_robots", "no_identity_proof", "no_norwegian_context", "site_names_other_entity")
+REGISTRY_DECLARED_OK = ("blocked_by_robots", "no_identity_proof", "no_norwegian_context", "site_names_other_entity", "site_owned_by_other_entity",
+                        "name_only")
 WEBSITE_DEPENDENT = ("public_brand", "website_locations", "people_on_website", "social_profile", "company_news")
 
 

@@ -117,6 +117,16 @@ class IdentityGateTest(unittest.TestCase):
         self.assertTrue(_proof(ctx(phone=None, email=None, roles=[]), v2, "name_guess", "sandneselektriske.no").get("reject"))
         self.assertIsNone(full_name_in_text("SANDNES ELEKTRISKE AS", "Sandnes Elektriske ASA"))
 
+    def test_registered_name_rule_rejects_group_domain_and_foreign_orgnr(self):
+        # parent group domain derived from a shortened name (Mesta Eiendom AS on mesta.no)
+        v = visit("https://www.mesta.no/", "<html lang='no'><body>Eiendom/Mesta eiendom AS Nattlandsveien</body></html>")
+        c = ctx(legal_name="MESTA EIENDOM AS", phone=None, email=None, roles=[])
+        self.assertTrue(_proof(c, v, "name_guess", "mesta.no").get("reject"))
+        # same name, but the page states another organisation number
+        v = visit("https://www.duofrisor.no/", "<html lang='no'><body>Duo Frisør AS · Slependen · Orgnr 935 991 722</body></html>")
+        c = ctx(legal_name="DUO FRISØR AS", phone=None, email=None, roles=[])
+        self.assertTrue(_proof(c, v, "name_guess", "duofrisor.no").get("reject"))
+
     def test_registered_address_needs_name_or_name_domain(self):
         # parent company's site reached through the registry e-mail domain: address shared, name absent -> no proof
         html = "<html lang='no'><body>Molde og Romsdal Havn IKS Strandgata 21 4307 Sandnes</body></html>"
@@ -153,6 +163,23 @@ class IdentityGateTest(unittest.TestCase):
         c = ctx(legal_name="SAUDA HOLDING AS", former_names=["SAUDA MASKINERING AS"], phone=None, email=None, industry_code="64.200",
                 roles=[{"name": "Odd-Åge Hustveit", "is_person": True, "role_code": "DAGL"}])
         self.assertTrue(_proof(c, v, "former_name_guess", "saudamaskinering.no").get("reject"))
+
+
+    def test_address_name_and_owner_site(self):
+        # a property company named after its street address, found on the owner's site
+        v = visit("https://horeka.no/", "<html lang='no'><title>Horeka AS</title><body>Horeka AS, Lyseveien 16. Tlf 51 68 57 00. © Horeka AS</body></html>")
+        c = ctx(legal_name="LYSEVEIEN 16 AS", email=None)
+        self.assertTrue(_proof(c, v, "registry_email_domain", "horeka.no").get("reject"))
+        # our name only in running text, the footer and title identify a group company
+        v = visit("https://misje.no/", "<html lang='no'><title>Misje Rederi AS</title><body>Fleet: Sandnes Elektriske. Contact 51 68 57 00. "
+                  + "Vi driver tørrlastskip i Nordsjøen. " * 60 + "© Misje Rederi AS</body></html>")
+        self.assertTrue(_proof(ctx(email=None), v, "registry_website", "misje.no").get("reject"))
+
+
+    def test_spacing_variant_of_own_name_is_not_another_entity(self):
+        from signalpost.website import other_entities
+        page = Page("https://ecotrawl.no/", "<html><title>Ecotrawl</title><body>Ecotrawl AS lager trål.</body></html>")
+        self.assertEqual(other_entities({"legal_name": "ECO TRAWL AS", "former_names": [], "subunits": []}, page), [])
 
 
 class SynthesisTest(unittest.TestCase):

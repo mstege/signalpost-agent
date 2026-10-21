@@ -74,7 +74,7 @@ def research_company(org: str, *, fetcher: Fetcher, bulk: BulkRegistry | None, p
                 site = discover_and_verify(ctx, fetcher, ledger, deadline)
             else:
                 ledger.mark("official_website", "failed", "company time budget exhausted before website discovery")
-            if site and time.monotonic() < deadline:
+            if site and site.get("crawl", True) and time.monotonic() < deadline:
                 crawl_site(ctx, site, fetcher, ledger, deadline)
         else:
             work.terminal = "failed"

@@ -97,6 +97,10 @@ A domain becomes `official_website` only with one of these proofs on the fetched
 | `registry_website_with_registered_address` / `registry_email_domain_with_registered_address` | the register declares the domain, the page shows the registered street, postcode and town, **and** the page names the company or the domain is derived from its name |
 | `registered_name_with_legal_form_on_name_domain` | the complete registered name including its legal form (e.g. "Bokonsept AS"; registered names are unique in Norway) on a domain derived from that name, Norwegian context, distinctive name, no other entity named |
 
+**Own page on a chain site.** When a company's domain redirects to its own member or dealer page
+on a chain or platform site (the page path carries the company name), that page is published as
+the website and the rest of the chain site is not crawled.
+
 **Registry-declared website.** When the register's own `hjemmeside` field names a reachable (or
 robots-blocked) domain that carries no page-level proof, the domain is published as
 `official_website` with `relation: "registry_declared"`, confidence 0.8 and the register field
@@ -107,7 +111,11 @@ foundations (usually on their manager's domain).
 
 Always rejected (recorded as `ambiguous` or `not_available` with the reason): parked or
 placeholder domains, pages without Norwegian context (foreign group sites), pages that name a
-different legal entity as owner while ours is absent, holding companies whose contact details
+different legal entity as owner while ours is absent, pages whose title, site name or copyright
+line identify another legal entity while ours appears only in running text (group, owner, manager
+or service-provider sites), a name match for a company whose name is a street address
+("Lyseveien 16 AS"), matches through a former name that another registered entity now carries,
+a registered name that the page pairs with a different organisation number, holding companies whose contact details
 appear only on the operating company's site, housing cooperatives / foundations / co-ownerships
 on a manager's domain, and name-only matches. It is better to miss a site than to publish
 another company's facts.
