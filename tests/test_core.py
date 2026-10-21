@@ -147,6 +147,14 @@ class IdentityGateTest(unittest.TestCase):
         self.assertFalse(_publish_registry_declared(c3, Ledger(ORG)))
 
 
+    def test_holding_named_only_by_former_name_is_rejected(self):
+        html = "<html lang='no'><body>Velkommen til Sauda Maskinering AS. Daglig leder: Odd-Åge Hustveit</body></html>"
+        v = visit("https://saudamaskinering.no/", html)
+        c = ctx(legal_name="SAUDA HOLDING AS", former_names=["SAUDA MASKINERING AS"], phone=None, email=None, industry_code="64.200",
+                roles=[{"name": "Odd-Åge Hustveit", "is_person": True, "role_code": "DAGL"}])
+        self.assertTrue(_proof(c, v, "former_name_guess", "saudamaskinering.no").get("reject"))
+
+
 class SynthesisTest(unittest.TestCase):
     def test_derived_ratios_cite_claims_and_points_are_supported(self):
         snap = Snapshot("https://data.brreg.no/r", "https://data.brreg.no/r", 200, "t", content_sha256="z" * 64, content_type="application/json", text="{}")

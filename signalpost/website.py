@@ -247,7 +247,8 @@ def _proof(ctx: dict, visit: SiteVisit, origin: str, candidate_host: str) -> dic
     if managed and not domain_named:
         return {"level": "managed_entity_without_own_domain", "span": final_host, "named": named, "reject": True}
     holding = "holding" in legal.lower() or str(ctx.get("industry_code") or "").startswith("64.2")
-    if holding and not named and origin != "registry_website":
+    named_now = name_in_text(legal, hay + " " + page.title)
+    if holding and not named_now and origin != "registry_website":
         return {"level": "holding_without_own_name_on_site", "span": "", "named": False, "reject": True}
     phone = phone_digits(ctx.get("phone"))
     if phone:
@@ -291,6 +292,26 @@ def _proof(ctx: dict, visit: SiteVisit, origin: str, candidate_host: str) -> dic
     if named:
         return {"level": "name_only", "span": _name_span(legal, hay + " " + page.title), "named": True, "reject": True}
     return None
+
+
+BRREG_NAME_SEARCH = "https://data.brreg.no/enhetsregisteret/api/enheter?navn={name}&size=20"
+
+
+def _former_name_taken(ctx: dict, fetcher: Fetcher) -> bool:
+    """True when another registered entity now carries one of our former names (the site is then most likely theirs)."""
+    own = ctx["organisation_number"]
+    for former in ctx.get("former_names") or []:
+        snap = fetcher.get(BRREG_NAME_SEARCH.format(name=urllib.parse.quote(former)), accept="application/json", check_robots=False)
+        if not snap.ok:
+            return True  # cannot rule it out: abstain
+        try:
+            rows = (snap.json().get("_embedded") or {}).get("enheter") or []
+        except ValueError:
+            return True
+        target = " ".join(former.upper().split())
+        if any(" ".join((r.get("navn") or "").upper().split()) == target and r.get("organisasjonsnummer") != own for r in rows):
+            return True
+    return False
 
 
 def _managed_entity(ctx: dict) -> bool:
@@ -412,6 +433,9 @@ def discover_and_verify(ctx: dict, fetcher: Fetcher, ledger: Ledger, deadline: f
                 continue
         else:
             visit_proof = visit
+        if cand["origin"] == "former_name_guess" and _former_name_taken(ctx, fetcher):
+            record["result"] = "former_name_now_held_by_other_entity"
+            continue
         record["result"] = "verified:" + proof["level"]
         final = visit.snap.final_url or cand["url"]
         parts = urllib.parse.urlsplit(final)
