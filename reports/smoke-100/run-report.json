@@ -1,18 +1,17 @@
 {
-  "run_id": "run-20261020T151356Z",
-  "agent": "signalpost-agent 0.1.0",
-  "started_at": "2026-10-20T15:13:56Z",
-  "completed_at": "2026-10-20T15:19:07Z",
-  "runtime_seconds": 311.0,
+  "run_id": "run-20261021T143951Z",
+  "agent": "signalpost-agent 0.2.0",
+  "started_at": "2026-10-21T14:39:51Z",
+  "completed_at": "2026-10-21T14:45:29Z",
+  "runtime_seconds": 337.8,
   "input_count": 100,
   "emitted_envelopes": 100,
-  "output": "<out>/envelopes.jsonl",
+  "output": "../out/envelopes.jsonl",
   "envelope_states": {
     "available": 100
   },
   "terminal_status": {
-    "completed": 99,
-    "partial": 1
+    "completed": 100
   },
   "field_family_states": {
     "legal_identity": {
@@ -20,8 +19,8 @@
     },
     "public_brand": {
       "available": 13,
-      "not_available": 82,
-      "ambiguous": 5
+      "not_available": 80,
+      "ambiguous": 7
     },
     "contact_details": {
       "available": 36,
@@ -39,53 +38,53 @@
     },
     "website_locations": {
       "available": 8,
-      "not_available": 87,
-      "ambiguous": 5
+      "not_available": 85,
+      "ambiguous": 7
     },
     "people_on_website": {
-      "not_available": 86,
-      "ambiguous": 5,
+      "not_available": 84,
+      "ambiguous": 7,
       "available": 9
     },
     "official_website": {
-      "available": 13,
-      "not_available": 82,
-      "ambiguous": 5
+      "available": 15,
+      "not_available": 78,
+      "ambiguous": 7
     },
     "social_profile": {
       "available": 8,
-      "not_available": 87,
-      "ambiguous": 5
+      "not_available": 85,
+      "ambiguous": 7
     },
     "job_posting": {
       "not_available": 98,
       "available": 2
     },
     "company_news": {
-      "not_available": 89,
+      "not_available": 87,
       "available": 6,
-      "ambiguous": 5
+      "ambiguous": 7
     },
     "registry_event": {
       "available": 100
     }
   },
-  "companies_with_verified_website": 13,
-  "claims_total": 4785,
+  "companies_with_verified_website": 15,
+  "claims_total": 4787,
   "changes_total": 0,
   "operations": {
-    "requests": 10522,
-    "bytes": 188644275,
-    "p50_company_ms": 2864,
-    "p95_company_ms": 42738,
+    "requests": 10705,
+    "bytes": 192609656,
+    "p50_company_ms": 2940,
+    "p95_company_ms": 42635,
     "third_party_cost_usd": 0.0,
     "nav_index": {
       "state": "ready",
       "pages": 214,
-      "active_ads": 9660,
-      "details_fetched": 9660,
+      "active_ads": 9824,
+      "details_fetched": 9824,
       "details_cached": 0,
-      "employers": 5969,
+      "employers": 6073,
       "error": null
     }
   },
