@@ -26,6 +26,7 @@ h2{font-size:16px;margin:0 0 8px}.state{font-size:12px;font-weight:600;text-tran
 .state.available{color:var(--ok)}.state.not_available,.state.not_applicable{color:var(--muted)}.state.ambiguous,.state.blocked{color:var(--warn)}.state.failed{color:var(--bad)}
 .claim{padding:6px 0;border-bottom:1px dashed var(--line)}.claim ul{margin:2px 0 0;padding-left:18px}.kf td:first-child{color:var(--muted);width:38%}.claim:last-child{border-bottom:0}.field{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.03em}
 .src{font-size:12px;color:var(--muted)}sup a{text-decoration:none;font-size:11px}
+.headline{font-size:17px;font-weight:600;margin:4px 0 10px}.points{padding-left:18px}.points li{margin:4px 0}.points .chip{font-size:11px;padding:1px 6px}
 details summary{cursor:pointer;color:var(--accent)}.ev{font-size:12px;border-left:3px solid var(--line);padding:4px 8px;margin:6px 0;word-break:break-word}
 .ev:target{border-color:var(--accent);background:var(--chip)}
 .cmp{display:none}.cmp.on{display:block}
@@ -65,6 +66,20 @@ def _value(claim: dict) -> str:
     return _e(s)
 
 
+# The five data areas Builderr's own sample uses to describe profile coverage.
+DATA_AREAS = {
+    "Company record": ("legal_identity",),
+    "Financials": ("annual_accounts",),
+    "People & locations": ("leadership", "registered_workplace", "website_locations", "people_on_website"),
+    "Company website": ("official_website",),
+    "Public footprint": ("social_profile", "job_posting", "company_news"),
+}
+
+
+def data_areas(fams: dict) -> list[str]:
+    return [area for area, families in DATA_AREAS.items() if any(fams.get(f, {}).get("state") == "available" for f in families)]
+
+
 def summary_row(env: dict) -> dict:
     claims = [c for c in env["claims"] if c.get("availability", "available") == "available"]
 
@@ -86,9 +101,12 @@ def summary_row(env: dict) -> dict:
         "revenue_year": revenue[-1]["year"] if revenue else None,
         "result": result[-1]["amount"] if result else None,
         "website": first("official_website"),
+        "website_declared": any(c["field"] == "official_website" and c.get("relation") == "registry_declared" for c in claims),
         "jobs": sum(1 for c in claims if c["field"] == "job_posting"),
         "news": sum(1 for c in claims if c["field"] == "company_news"),
         "social": sum(1 for c in claims if c["field"] == "social_profile"),
+        "areas": data_areas(fams),
+        "areas_n": len(data_areas(fams)),
         "families": sum(1 for f in fams.values() if f["state"] == "available"),
         "families_total": len(fams),
         "changes": len(env.get("changes") or []),
@@ -121,7 +139,7 @@ def index_page(rows: list[dict], report: dict) -> str:
 {report.get('emitted_envelopes')} companies · every fact links to its source and retrieval date</p></header>
 <main>
 <div class="controls"><input id="q" type="search" placeholder="Search name, org. number, municipality, industry…" aria-label="Search">
-<select id="f" aria-label="Filter"><option value="">All companies</option><option value="web">With verified website</option>
+<select id="f" aria-label="Filter"><option value="">All companies</option><option value="all5">All five data areas</option><option value="web">With website</option>
 <option value="jobs">Hiring (job postings)</option><option value="news">With dated news</option><option value="changes">Changed since last run</option></select>
 <select id="s" aria-label="Sort"><option value="families">Most verified data</option><option value="name">Name A–Z</option>
 <option value="revenue">Revenue</option><option value="employees">Employees</option></select>
@@ -138,20 +156,20 @@ const sel=new Set();
 function render(){{
  const q=document.getElementById('q').value.toLowerCase().trim(),f=document.getElementById('f').value,s=document.getElementById('s').value;
  let r=rows.filter(x=>!q||[x.name,x.org,x.muni,x.industry,x.brand,x.website].join(' ').toLowerCase().includes(q));
- if(f==='web')r=r.filter(x=>x.website);if(f==='jobs')r=r.filter(x=>x.jobs);if(f==='news')r=r.filter(x=>x.news);if(f==='changes')r=r.filter(x=>x.changes);
- r.sort((a,b)=>s==='name'?a.name.localeCompare(b.name):s==='revenue'?(b.revenue||-1e18)-(a.revenue||-1e18):s==='employees'?(b.employees||-1)-(a.employees||-1):b.families-a.families);
+ if(f==='all5')r=r.filter(x=>x.areas.length===5);if(f==='web')r=r.filter(x=>x.website);if(f==='jobs')r=r.filter(x=>x.jobs);if(f==='news')r=r.filter(x=>x.news);if(f==='changes')r=r.filter(x=>x.changes);
+ r.sort((a,b)=>s==='name'?a.name.localeCompare(b.name):s==='revenue'?(b.revenue||-1e18)-(a.revenue||-1e18):s==='employees'?(b.employees||-1)-(a.employees||-1):(b.areas.length-a.areas.length)||(b.families-a.families));
  document.getElementById('list').innerHTML=r.slice(0,600).map(x=>`<div class="card"><label class="pick"><input type="checkbox" data-org="${{x.org}}" ${{sel.has(x.org)?'checked':''}}> compare</label>
  <a class="co" href="c/${{x.org}}.html"><h3>${{esc(x.name)}}</h3><div class="meta">${{x.org}} · ${{esc(x.form||'')}} · ${{esc(x.muni||'')}}</div>
  <div class="meta">${{esc((x.industry||'').slice(0,60))}}</div><div class="chips">
- <span class="chip">${{x.families}}/${{x.families_total}} areas</span>${{x.revenue!=null?`<span class="chip">Rev ${{fmt(x.revenue)}} (${{x.revenue_year}})</span>`:''}}
- ${{x.website?'<span class="chip ok">website ✓</span>':''}}${{x.jobs?`<span class="chip ok">${{x.jobs}} jobs</span>`:''}}${{x.news?`<span class="chip">${{x.news}} news</span>`:''}}
+ <span class="chip ${{x.areas.length===5?'ok':''}}" title="${{esc(x.areas.join(', '))}}">${{x.areas.length}}/5 data areas</span>${{x.revenue!=null?`<span class="chip">Rev ${{fmt(x.revenue)}} (${{x.revenue_year}})</span>`:''}}
+ ${{x.website?(x.website_declared?'<span class="chip">website (register)</span>':'<span class="chip ok">website ✓</span>'):''}}${{x.jobs?`<span class="chip ok">${{x.jobs}} jobs</span>`:''}}${{x.news?`<span class="chip">${{x.news}} news</span>`:''}}
  ${{x.changes?`<span class="chip warn">${{x.changes}} changes</span>`:''}}</div></a></div>`).join('')||'<p>No companies match.</p>';
  document.querySelectorAll('[data-org]').forEach(cb=>cb.onchange=()=>{{cb.checked?sel.add(cb.dataset.org):sel.delete(cb.dataset.org);document.getElementById('cmpbtn').textContent=`Compare selected (${{sel.size}})`}});
 }}
 function esc(s){{return String(s??'').replace(/[&<>"]/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]))}}
 document.getElementById('cmpbtn').onclick=()=>{{const box=document.getElementById('cmp');const c=rows.filter(x=>sel.has(x.org));
  if(!c.length){{box.classList.remove('on');return}}box.classList.add('on');
- const fields=[['Org. number','org'],['Legal form','form'],['Municipality','muni'],['Industry','industry'],['Employees (register)','employees'],['Revenue','revenue'],['Net result','result'],['Website','website'],['Job postings','jobs'],['News items','news'],['Social profiles','social'],['Areas with data','families']];
+ const fields=[['Org. number','org'],['Legal form','form'],['Municipality','muni'],['Industry','industry'],['Employees (register)','employees'],['Revenue','revenue'],['Net result','result'],['Website','website'],['Job postings','jobs'],['News items','news'],['Social profiles','social'],['Data areas (of 5)','areas_n'],['Information families with data','families']];
  box.innerHTML=`<h2>Comparison</h2><div class="tablewrap"><table><tr><th></th>${{c.map(x=>`<th><a href="c/${{x.org}}.html">${{esc(x.name)}}</a></th>`).join('')}}</tr>`+
  fields.map(([l,k])=>`<tr><td>${{l}}</td>${{c.map(x=>`<td class="${{typeof x[k]==='number'?'num':''}}">${{k==='revenue'||k==='result'?fmt(x[k]):esc(x[k]??'–')}}</td>`).join('')}}</tr>`).join('')+'</table></div>';}};
 ['q','f','s'].forEach(id=>document.getElementById(id).addEventListener('input',render));render();
@@ -174,10 +192,15 @@ def company_page(env: dict) -> str:
 
     syn = env.get("synthesis") or {}
     brief = "".join(f"{_e(s['text'])}{cite(s['claim_ids'])} " for s in syn.get("sentences", [])) or "No supported summary available."
+    head = syn.get("headline") or {}
+    head_html = f"<p class='headline'>{_e(head['text'])}{cite(head['claim_ids'])}</p>" if head.get("text") else ""
+    points = "".join(f"<li><span class='chip'>{_e(p['kind'])}</span> {_e(p['text'])}{cite(p['claim_ids'])}</li>" for p in syn.get("key_points", []))
+    metrics = "".join(f"<tr><td>{_e(m['text'].split(': ', 1)[0])}</td><td class='num'>{_e(m['text'].split(': ', 1)[-1])}{cite(m['claim_ids'])}</td>"
+                      f"<td class='src'>{_e(m['formula'])}</td></tr>" for m in syn.get("derived_metrics", []))
     changed = "".join(f"<li>{_e(c['text'])}{cite(c['claim_ids'])}</li>" for c in syn.get("what_changed", []))
     events = "".join(f"<li>{_e(c['text'])}{cite(c['claim_ids'])}</li>" for c in syn.get("recent_official_events", []))
     unknown = "".join(f"<li><span class='state {_e(u['state'])}'>{_e(u['state'].replace('_', ' '))}</span> {_e(u['text'].split(':', 1)[0])}"
-                      f"<span class='src'>{_e(u['text'].split(' – ', 1)[1] if ' – ' in u['text'] else '')}</span></li>" for u in syn.get("unknowns", []))
+                      + (f" <span class='src'>– {_e(u['text'].split(' – ', 1)[1])}</span>" if ' – ' in u['text'] else '') + "</li>" for u in syn.get("unknowns", []))
     sections_html = []
     for sid, sec in env["sections"].items():
         if "claim_ids" not in sec:
@@ -220,8 +243,9 @@ def company_page(env: dict) -> str:
     facts = [("Organisation number", row["org"]), ("Legal form", row["form"]), ("Municipality", row["muni"]), ("Industry", row["industry"]),
              ("Registered employees", row["employees"]), ("Revenue", f"{row['revenue']:,.0f} ({row['revenue_year']})".replace(",", " ") if row["revenue"] is not None else None),
              ("Net result", f"{row['result']:,.0f}".replace(",", " ") if row["result"] is not None else None), ("CEO", ceo),
-             ("Website", f'<a href="{_e(row["website"])}" rel="noopener nofollow">{_e(row["website"])}</a>' if row["website"] else None),
-             ("Job postings", row["jobs"] or None), ("Dated news items", row["news"] or None), ("Areas with data", f"{row['families']}/{row['families_total']}")]
+             ("Website", f'<a href="{_e(row["website"])}" rel="noopener nofollow">{_e(row["website"])}</a>'
+              + (' <span class="src">declared in the register, not verified on the page</span>' if row["website_declared"] else '') if row["website"] else None),
+             ("Job postings", row["jobs"] or None), ("Dated news items", row["news"] or None), ("Data areas", f"{len(row['areas'])}/5 ({', '.join(row['areas'])})"), ("Information families with data", f"{row['families']}/{row['families_total']}")]
     key_facts = "".join(f"<tr><td>{_e(k)}</td><td>{v if k == 'Website' else _e(v)}</td></tr>" for k, v in facts if v not in (None, ""))
     run = env["run"]
     return _head(f"{li.get('legal_name') or env['organisation_number']} – Signalpost") + f"""
@@ -230,7 +254,10 @@ def company_page(env: dict) -> str:
 {(' · brand “' + _e(li.get('public_brand')) + '”') if li.get('public_brand') else ''} · <a href="../index.html">all companies</a></p></header>
 <main>
 <section class="card"><h2>Key facts</h2><div class="tablewrap"><table class="kf">{key_facts}</table></div></section>
-<section class="card"><h2>Brief</h2><p>{brief}</p>
+<section class="card"><h2>Brief</h2>{head_html}
+{f'<h2>Key points</h2><ul class="points">{points}</ul>' if points else ''}
+<p>{brief}</p>
+{f'<h2>Derived ratios</h2><div class="tablewrap"><table><tr><th>Ratio</th><th>Value</th><th>Formula</th></tr>{metrics}</table></div>' if metrics else ''}
 {f'<h2>What changed since the previous run</h2><ul>{changed}</ul>' if changed else '<p class="src">No changes since the previous run (or first run).</p>'}
 {f'<h2>Recent official events</h2><ul>{events}</ul>' if events else ''}
 {f'<h2>Unknown or unavailable</h2><ul>{unknown}</ul>' if unknown else ''}

@@ -108,6 +108,13 @@ def main(argv: list[str] | None = None) -> int:
     fetcher.gate = _RoutingGate(fetcher.gate, registry_gate)
     bulk = BulkRegistry(args.bulk, set(orgs)) if args.bulk else None
     previous = load_previous(args.previous, args.state_dir, orgs)
+    wikidata_map: dict = {}
+    if not args.no_site:
+        try:
+            from .wikidata import lookup
+            wikidata_map = lookup(orgs, fetcher)
+        except Exception as exc:  # noqa: BLE001 - optional source
+            print(f"warning: wikidata lookup failed: {exc}", file=sys.stderr)
     nav = None
     if not args.no_nav:
         nav = NavJobIndex(fetcher, window_days=args.nav_window_days, time_limit=min(480.0, args.time_budget * 0.3),
@@ -128,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
             return failed_envelope(org, run_id, "batch time budget exhausted before this company started", previous.get(org))
         cf = CountingFetcher(fetcher)
         return research_company(org, fetcher=cf, bulk=bulk, previous=previous.get(org), budget_seconds=args.company_budget,
-                                global_deadline=global_deadline, use_sites=not args.no_site)
+                                global_deadline=global_deadline, use_sites=not args.no_site, wikidata=wikidata_map.get(org))
 
     def finalize(work) -> dict:
         if isinstance(work, dict):

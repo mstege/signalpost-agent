@@ -93,7 +93,196 @@ def _pct(new, old) -> str | None:
     return f"{change:+.0f}%"
 
 
-def build_synthesis(ctx: dict, ledger: Ledger, changes: list[dict]) -> dict:
+def _num(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fin_claim(ledger: Ledger, field: str, period: str) -> dict | None:
+    return next((c for c in ledger.claims_for(field) if c.get("reporting_period") == period), None)
+
+
+def _ratio_text(value: float) -> str:
+    return f"{value * 100:.0f}%" if abs(value) >= 0.095 else f"{value * 100:.1f}%"
+
+
+def derived_metrics(ctx: dict, ledger: Ledger) -> list[dict]:
+    """Ratios computed from filed accounts. Each states its formula and cites the claims it uses."""
+    accounts = ctx.get("accounts") or []
+    out: list[dict] = []
+    if not accounts:
+        return out
+    latest = accounts[-1]
+    period, year = latest["period"], latest["year"]
+    revenue, op, net = _num(latest.get("revenue")), _num(latest.get("operating_result")), _num(latest.get("net_result"))
+    equity, assets = _num(latest.get("equity")), _num(latest.get("total_assets"))
+
+    def ids(*fields: str, p: str = period) -> list[str]:
+        return [c["id"] for c in (_fin_claim(ledger, f, p) for f in fields) if c]
+
+    if revenue and revenue > 0 and op is not None:
+        out.append({"metric": "operating_margin", "year": year, "value": round(op / revenue, 4),
+                    "text": f"Operating margin {year}: {_ratio_text(op / revenue)}", "formula": "operating result / revenue",
+                    "claim_ids": ids("operating_result", "revenue")})
+    if revenue and revenue > 0 and net is not None:
+        out.append({"metric": "net_margin", "year": year, "value": round(net / revenue, 4),
+                    "text": f"Net margin {year}: {_ratio_text(net / revenue)}", "formula": "net result / revenue",
+                    "claim_ids": ids("net_result", "revenue")})
+    if assets and assets > 0 and equity is not None:
+        out.append({"metric": "equity_ratio", "year": year, "value": round(equity / assets, 4),
+                    "text": f"Equity ratio {year}: {_ratio_text(equity / assets)}", "formula": "equity / total assets",
+                    "claim_ids": ids("equity", "total_assets")})
+    employees = first_claim(ledger, "registered_employees")
+    emp = _num(employees["value"]) if employees else None
+    if revenue and emp and emp >= 1:
+        out.append({"metric": "revenue_per_employee", "year": year, "value": round(revenue / emp),
+                    "text": f"Revenue per registered employee {year}: {_fmt_money(revenue / emp, latest['currency'])}",
+                    "formula": "revenue / employees in the register (register count may be dated later than the accounts)",
+                    "claim_ids": ids("revenue") + [employees["id"]]})
+    with_rev = [a for a in accounts if _num(a.get("revenue")) is not None]
+    if len(with_rev) >= 2:
+        first, last = with_rev[0], with_rev[-1]
+        r0, r1 = _num(first["revenue"]), _num(last["revenue"])
+        n = int(last["year"]) - int(first["year"])
+        if r0 and r0 > 0 and r1 is not None and r1 > 0 and n >= 1:
+            cagr = (r1 / r0) ** (1 / n) - 1
+            out.append({"metric": "revenue_cagr", "year": f"{first['year']}–{last['year']}", "value": round(cagr, 4),
+                        "text": f"Revenue growth {first['year']}–{last['year']}: {cagr * 100:+.0f}% per year",
+                        "formula": "(latest revenue / earliest revenue)^(1/years) − 1",
+                        "claim_ids": ids("revenue", p=first["period"]) + ids("revenue", p=last["period"])})
+    return [m for m in out if m["claim_ids"]]
+
+
+def first_claim(ledger: Ledger, field: str) -> dict | None:
+    items = ledger.claims_for(field)
+    return items[0] if items else None
+
+
+def key_points(ctx: dict, ledger: Ledger, metrics: list[dict], today: str) -> list[dict]:
+    """Short decision-useful observations. Each is a direct reading of cited claims, never a guess."""
+    points: list[dict] = []
+
+    def point(kind: str, text: str, ids: list) -> None:
+        ids = [i for i in ids if i]
+        if ids:
+            points.append({"kind": kind, "text": text, "claim_ids": list(dict.fromkeys(ids))})
+
+    accounts = ctx.get("accounts") or []
+    with_net = [a for a in accounts if _num(a.get("net_result")) is not None]
+    if with_net:
+        net_ids = [c["id"] for a in with_net for c in [_fin_claim(ledger, "net_result", a["period"])] if c]
+        years = f"{with_net[0]['year']}–{with_net[-1]['year']}" if len(with_net) > 1 else with_net[0]["year"]
+        signs = [_num(a["net_result"]) >= 0 for a in with_net]
+        if len(signs) == 1:
+            point("financial", f"{'Profitable' if signs[0] else 'Net loss'} in {years}, the only filed year available.", net_ids)
+        elif all(signs):
+            point("financial", f"Profitable in every filed year shown ({years}).", net_ids)
+        elif not any(signs):
+            point("financial", f"Net loss in every filed year shown ({years}).", net_ids)
+        elif signs[-1] and not signs[-2]:
+            point("financial", f"Returned to profit in {with_net[-1]['year']} after a loss in {with_net[-2]['year']}.", net_ids[-2:])
+        elif not signs[-1]:
+            point("financial", f"Net loss in {with_net[-1]['year']} after a profit in {with_net[-2]['year']}.", net_ids[-2:])
+    by_metric = {m["metric"]: m for m in metrics}
+    if "revenue_cagr" in by_metric:
+        m = by_metric["revenue_cagr"]
+        trend = "growing" if m["value"] > 0.05 else "shrinking" if m["value"] < -0.05 else "roughly flat"
+        point("financial", f"Revenue is {trend} ({m['text'].split(': ', 1)[1]}, {m['year']}).", m["claim_ids"])
+    if "equity_ratio" in by_metric:
+        m = by_metric["equity_ratio"]
+        if m["value"] < 0:
+            point("risk", f"Negative equity in {m['year']}: liabilities exceed assets ({m['text'].split(': ', 1)[1]} equity ratio).", m["claim_ids"])
+        elif m["value"] < 0.1:
+            point("risk", f"Thin equity buffer in {m['year']} ({m['text'].split(': ', 1)[1]} equity ratio).", m["claim_ids"])
+        elif m["value"] >= 0.4:
+            point("financial", f"Solid equity buffer in {m['year']} ({m['text'].split(': ', 1)[1]} equity ratio).", m["claim_ids"])
+    latest_year = first_claim(ledger, "latest_filed_accounts_year")
+    if latest_year and today[:4].isdigit() and int(today[:4]) - int(str(latest_year["value"])[:4]) >= 2:
+        point("risk", f"Latest filed accounts are for {latest_year['value']}; newer figures are not in the register.", [latest_year["id"]])
+    status = first_claim(ledger, "legal_status")
+    if status and "active" not in str(status["value"]):
+        point("risk", f"Register status: {status['value']}.", [status["id"]])
+
+    roles = ctx.get("roles") or []
+    ceo = next((r for r in roles if r.get("role_code") == "DAGL"), None)
+    chair = next((r for r in roles if r.get("role_code") == "LEDE"), None)
+    leaders = ledger.claims_for("leadership")
+    if ceo and chair and ceo.get("name") and ceo["name"] == chair.get("name"):
+        ids = [c["id"] for c in leaders if ceo["name"] in str(c["value"]) and str(c["value"]).startswith(("Daglig leder", "Styrets leder"))]
+        point("leadership", f"{ceo['name']} is both CEO and board chair.", ids)
+    elif not ceo and chair:
+        ids = [c["id"] for c in leaders if str(c["value"]).startswith("Styrets leder")]
+        point("leadership", f"No CEO (daglig leder) is registered; the board is chaired by {chair['name']}.", ids)
+    cutoff = f"{int(today[:4]) - 1}{today[4:10]}" if today[:4].isdigit() else ""
+    for ev in sorted(ledger.claims_for("registry_event"), key=lambda c: c["value"]["date"], reverse=True):
+        text = ev["value"]["event"]
+        if cutoff and ev["value"]["date"] >= cutoff and text.startswith("Role group last changed") and \
+                any(g in text for g in ("Daglig leder", "Styre", "Innehaver")):
+            point("leadership", f"Leadership register updated within the last 12 months ({ev['value']['date']}: {text.split(': ', 1)[1]}).", [ev["id"]])
+            break
+    workplaces = ledger.claims_for("registered_workplace")
+    if len(workplaces) >= 2:
+        point("operations", f"Operates from {len(workplaces)} registered workplaces.", [c["id"] for c in workplaces[:5]])
+
+    site = first_claim(ledger, "official_website")
+    socials = ledger.claims_for("social_profile")
+    news = sorted(ledger.claims_for("company_news"), key=lambda c: c["value"]["date"], reverse=True)
+    jobs = ledger.claims_for("job_posting")
+    if jobs:
+        point("activity", f"Hiring: {len(jobs)} job posting(s) found in permitted sources.", [j["id"] for j in jobs[:8]])
+    if news and cutoff and news[0]["value"]["date"] >= cutoff:
+        point("activity", f"Recently active publicly: company news dated {news[0]['value']['date']}.", [news[0]["id"]])
+    if site and site.get("relation") == "registry_declared":
+        point("footprint", "Website is declared in the register but could not be verified on the page; its content is not used.", [site["id"]])
+    elif site:
+        point("footprint", f"Verified company website{' with ' + str(len(socials)) + ' linked social profile(s)' if socials else ''}.",
+              [site["id"]] + [s["id"] for s in socials[:6]])
+    code = str(ctx.get("industry_code") or "")
+    industry = first_claim(ledger, "industry")
+    if industry and code.startswith("64.2"):
+        point("context", "Registered as a holding company: its own accounts may not reflect the activity of companies it owns.", [industry["id"]])
+    elif industry and code.startswith("68.2"):
+        point("context", "Registered for letting of own or leased real estate: revenue is typically rental income.", [industry["id"]])
+    return points
+
+
+def headline(ctx: dict, ledger: Ledger, metrics: list[dict]) -> dict | None:
+    name = first_claim(ledger, "legal_name")
+    if not name:
+        return None
+    ids = [name["id"]]
+    accounts = ctx.get("accounts") or []
+    parts = []
+    employees = first_claim(ledger, "registered_employees")
+    industry = first_claim(ledger, "industry")
+    muni = first_claim(ledger, "municipality")
+    desc = (ctx.get("industry") or "").strip()
+    where = f" ({str(muni['value']).title()})" if muni else ""
+    parts.append(f"{name['value']}{where}: {desc or 'registered entity'}")
+    if industry:
+        ids.append(industry["id"])
+    if muni:
+        ids.append(muni["id"])
+    if accounts and _num(accounts[-1].get("revenue")) is not None:
+        latest = accounts[-1]
+        rev = _fin_claim(ledger, "revenue", latest["period"])
+        text = f"revenue {_fmt_money(latest['revenue'], latest['currency'])} in {latest['year']}"
+        net = _num(latest.get("net_result"))
+        if net is not None:
+            text += ", profitable" if net >= 0 else ", loss-making"
+            nc = _fin_claim(ledger, "net_result", latest["period"])
+            ids += [nc["id"]] if nc else []
+        parts.append(text)
+        ids += [rev["id"]] if rev else []
+    if employees:
+        parts.append(f"{employees['value']} registered employees")
+        ids.append(employees["id"])
+    return {"text": "; ".join(parts) + ".", "claim_ids": ids}
+
+
+def build_synthesis(ctx: dict, ledger: Ledger, changes: list[dict], today: str = "") -> dict:
     sentences: list[dict] = []
 
     def say(text: str, *claim_ids: str | None) -> None:
@@ -177,7 +366,8 @@ def build_synthesis(ctx: dict, ledger: Ledger, changes: list[dict]) -> dict:
     site = first("official_website")
     socials = ledger.claims_for("social_profile")
     if site:
-        text = f"Verified website: {site['value']}"
+        declared = site.get("relation") == "registry_declared"
+        text = f"{'Website declared in the register (not verified on the page)' if declared else 'Verified website'}: {site['value']}"
         if socials:
             text += f", linking {len(socials)} company-owned profile(s) ({', '.join(sorted({s['value']['platform'] for s in socials}))})"
         say(text + ".", site["id"], *[s["id"] for s in socials[:6]])
@@ -205,10 +395,15 @@ def build_synthesis(ctx: dict, ledger: Ledger, changes: list[dict]) -> dict:
         if state and state != "available":
             unknowns.append({"family": family, "state": state, "text": f"{label}: {state.replace('_', ' ')}"
                              + (f" – {ledger.field_states[family].get('reason')}" if ledger.field_states[family].get("reason") else "")})
+    metrics = derived_metrics(ctx, ledger)
+    head = headline(ctx, ledger, metrics)
     return {
-        "method": "deterministic template over published claims (no language model)",
+        "method": "deterministic template over published claims (no language model); derived ratios state their formula",
+        "headline": head,
         "summary": " ".join(s["text"] for s in sentences),
         "sentences": sentences,
+        "key_points": key_points(ctx, ledger, metrics, today or ""),
+        "derived_metrics": metrics,
         "what_changed": change_lines,
         "recent_official_events": recent_events,
         "unknowns": unknowns,

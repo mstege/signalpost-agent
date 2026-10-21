@@ -13,8 +13,9 @@ next to the results.
 - **Pure Python standard library.** No third-party packages, no install step, no API keys.
 - **No language model.** Synthesis is a deterministic template over published claims, so it
   cannot invent facts. Third-party cost per run: **USD 0**.
-- **Precision first.** A website is published only with page-level proof tied to the
-  organisation number. Name similarity alone always abstains.
+- **Precision first.** Company-owned content is read only from a website with page-level proof
+  tied to the exact legal entity. A homepage that only the register declares is reported as such,
+  without reading its pages. Name similarity alone always abstains.
 
 ## Run it (one command)
 
@@ -59,9 +60,10 @@ Tests (offline): `python3 -m unittest discover -s tests`
    cites the API URL, retrieval time, response hash and JSON path.
 2. **Dated official events** — founding, register entries, VAT registration, articles date,
    share-capital changes, name changes, role-group changes, employee-count updates.
-3. **Website discovery** — candidates from the registry website, the registry e-mail domain
-   (free-mail domains excluded), subunit websites, and domains derived from the legal name,
-   former names and subunit names. DNS-filtered, then fetched (robots.txt respected).
+3. **Website discovery** — candidates from the registry website, Wikidata items that carry the
+   exact organisation number (P2333 → official website P856, one query per batch), the registry
+   e-mail domain (free-mail domains excluded), subunit websites, and domains derived from the
+   legal name, former names and subunit names. DNS-filtered, then fetched (robots.txt respected).
 4. **Identity gate** — see below. Failing candidates are recorded with the reason.
 5. **Company-owned extraction** on the verified site (≤ ~16 pages): social profiles linked by
    the site, contact e-mail/phone, visiting addresses, public brand, self-description,
@@ -70,9 +72,13 @@ Tests (offline): `python3 -m unittest discover -s tests`
 6. **Jobs from NAV** — the public NAV job feed (arbeidsplassen.nav.no). Every active ad's
    employer organisation number is resolved once per run (cached across runs), and ads are
    matched to the company or one of its registered subunits by number.
-7. **Synthesis** — what the company does, latest filed numbers with year-on-year change,
-   leadership, workplaces, web presence, hiring, latest news, what changed since the last
-   run and what remains unknown. Every sentence carries the claim ids it rests on.
+7. **Synthesis** — a one-line headline, decision-useful key points (profit history, revenue
+   trend, equity buffer, stale filings, register status, CEO/chair structure, recent leadership
+   register updates, workplaces, hiring, recent news, web footprint, holding/property context),
+   derived ratios (operating and net margin, equity ratio, revenue per employee, revenue growth)
+   that state their formula, a short brief, what changed since the last run, recent official
+   events and every information family that remains unknown with its reason. Every sentence,
+   point and ratio carries the claim ids it rests on.
 8. **Refresh** — stable claim ids, typed changes (`new_role`, `closed_job`, `new_filing`,
    `changed_business_address`, …), carried-forward values when a source fails, superseded
    evidence preserved. Re-running on the same snapshot produces no changes.
@@ -88,6 +94,16 @@ A domain becomes `official_website` only with one of these proofs on the fetched
 | `registry_website_with_legal_name` / `registry_email_domain_with_legal_name` | the register itself declares the domain, and the legal name is on the page |
 | `legal_name_and_registered_leader_on_page` | legal name plus the registered CEO/chair by name |
 | `legal_name_and_registered_address_on_page` | distinctive legal name plus registered street and postcode |
+| `registry_website_with_registered_address` / `registry_email_domain_with_registered_address` | the register declares the domain, the page shows the registered street, postcode and town, **and** the page names the company or the domain is derived from its name |
+| `registered_name_with_legal_form_on_name_domain` | the complete registered name including its legal form (e.g. "Bokonsept AS"; registered names are unique in Norway) on a domain derived from that name, Norwegian context, distinctive name, no other entity named |
+
+**Registry-declared website.** When the register's own `hjemmeside` field names a reachable (or
+robots-blocked) domain that carries no page-level proof, the domain is published as
+`official_website` with `relation: "registry_declared"`, confidence 0.8 and the register field
+as evidence — and **nothing is read from its pages**, because such a domain can belong to a chain,
+group or franchise brand. Not published this way: parked or unreachable domains, a declared
+domain that now redirects to a different domain, and housing cooperatives, co-ownerships and
+foundations (usually on their manager's domain).
 
 Always rejected (recorded as `ambiguous` or `not_available` with the reason): parked or
 placeholder domains, pages without Norwegian context (foreign group sites), pages that name a
@@ -118,6 +134,7 @@ States: `available`, `not_available`, `blocked` (the source disallows access, e.
 | Brønnøysundregistrene Enhetsregisteret and Regnskapsregisteret (data.brreg.no) | open JSON API | NLOD 2.0 |
 | NAV job feed (pam-stilling-feed.nav.no) | public API with NAV's published public token (fetched at run time; `NAV_FEED_TOKEN` overrides) | [vilkår](https://arbeidsplassen.nav.no/vilkar-api): republishing active ads permitted; inactive ads are dropped; contact persons are not published |
 | Verified company websites | HTTP GET, robots.txt respected, ≤ 2 concurrent requests per host | company-owned content, cited with URL, time and hash |
+| Wikidata Query Service (query.wikidata.org) | one SPARQL query per 200 organisation numbers, descriptive User-Agent | CC0; only a website candidate, published only after the page-level gate |
 
 Not used: search-engine result pages, LinkedIn/Meta/Glassdoor/Indeed/Google scraping, paid
 data providers, language models. Social profiles are reported only as links published by the

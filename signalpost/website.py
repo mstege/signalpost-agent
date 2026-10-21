@@ -12,7 +12,7 @@ import urllib.parse
 from datetime import datetime
 
 from .evidence import Ledger
-from .names import (FREE_MAIL, core_name, tokens, domain_slugs, distinctive, domain_candidates, name_in_text, orgnr_regex, orgnrs_in,
+from .names import (FREE_MAIL, core_name, tokens, domain_slugs, distinctive, domain_candidates, full_name_in_text, name_in_text, orgnr_regex, orgnrs_in,
                     phone_digits, phones_in, registered_domain)
 from .net import Fetcher, Snapshot, resolve
 from .page import Page, snippet
@@ -111,6 +111,9 @@ def build_candidates(ctx: dict) -> list[dict]:
         out.append({"url": url, "origin": origin})
 
     add(ctx.get("website"), "registry_website")
+    wd_sites = sorted((ctx.get("wikidata") or {}).get("sites") or [], key=lambda u: (not urllib.parse.urlsplit(u).hostname.endswith(".no"), len(u)))
+    for site in wd_sites[:2]:
+        add(site, "wikidata_website")
     email = (ctx.get("email") or "").strip().lower()
     if "@" in email:
         domain = email.split("@", 1)[1]
@@ -240,8 +243,7 @@ def _proof(ctx: dict, visit: SiteVisit, origin: str, candidate_host: str) -> dic
     others = other_entities(ctx, page)
     if not named and others:
         return {"level": "site_names_other_entity", "span": "; ".join(others), "named": False, "reject": True, "others": others}
-    managed = (ctx.get("legal_form") in ("BRL", "BBL", "ESEK", "STI", "SAM", "PK") or
-               bool(re.search(r"\b(borettslag|sameie|sameiet|stiftelse|stiftelsen|gavefond|legat|boligbyggelag)\b", legal, re.I)))
+    managed = _managed_entity(ctx)
     if managed and not domain_named:
         return {"level": "managed_entity_without_own_domain", "span": final_host, "named": named, "reject": True}
     holding = "holding" in legal.lower() or str(ctx.get("industry_code") or "").startswith("64.2")
@@ -261,9 +263,13 @@ def _proof(ctx: dict, visit: SiteVisit, origin: str, candidate_host: str) -> dic
                 return {"level": "registry_email_on_page", "span": f"mailto link {mail_links[0]}", "named": named}
         elif named or domain_named:
             return {"level": "registry_email_on_page", "span": snippet(text, idx, idx + len(email)), "named": named}
-    if named and same_domain and origin in ("registry_website", "registry_email_domain", "subunit_website"):
+    if named and same_domain and origin in ("registry_website", "registry_email_domain", "subunit_website", "wikidata_website"):
         span = _name_span(legal, hay + " " + page.title)
         return {"level": f"{origin}_with_legal_name", "span": span, "named": True}
+    if same_domain and (named or domain_named) and origin in ("registry_website", "registry_email_domain", "wikidata_website"):
+        hit = _address_on_page(ctx, text)
+        if hit is not None:
+            return {"level": f"{origin}_with_registered_address", "span": snippet(text, hit[0], hit[1]), "named": named}
     leader = _leader_on_page(ctx, text) if named and same_domain else None
     if leader and (distinctive(legal) or origin not in ("name_guess", "former_name_guess", "subunit_name_guess")):
         return {"level": "legal_name_and_registered_leader_on_page", "span": snippet(text, leader[1], leader[1] + len(leader[0])), "named": True}
@@ -277,8 +283,34 @@ def _proof(ctx: dict, visit: SiteVisit, origin: str, candidate_host: str) -> dic
         if street_hit and post_hit:
             i = low.find(street)
             return {"level": "legal_name_and_registered_address_on_page", "span": snippet(text, i, i + len(street)), "named": True}
+    if named and same_domain and domain_named and origin == "name_guess" and distinctive(legal) and not others:
+        flat = " ".join((hay + " " + page.title).split())
+        full = full_name_in_text(legal, flat)
+        if full is not None:
+            return {"level": "registered_name_with_legal_form_on_name_domain", "span": snippet(flat, full[0], full[1]), "named": True}
     if named:
         return {"level": "name_only", "span": _name_span(legal, hay + " " + page.title), "named": True, "reject": True}
+    return None
+
+
+def _managed_entity(ctx: dict) -> bool:
+    """Housing cooperatives, co-ownerships, foundations and funds are usually run from a manager's domain."""
+    return ctx.get("legal_form") in ("BRL", "BBL", "ESEK", "STI", "SAM", "PK") or \
+        bool(re.search(r"\b(borettslag|sameie|sameiet|stiftelse|stiftelsen|gavefond|legat|boligbyggelag)\b", ctx.get("legal_name") or "", re.I))
+
+
+def _address_on_page(ctx: dict, text: str) -> tuple[int, int] | None:
+    """Registered business or postal street plus postcode and town on the page."""
+    low = text.lower()
+    for addr in (ctx.get("address") or {}, ctx.get("postal") or {}):
+        street = " ".join((addr.get("adresse") or [])[:1]).lower().strip()
+        postcode = addr.get("postnummer") or ""
+        town = (addr.get("poststed") or "").lower()
+        if len(street) <= 5 or not re.search(r"\d", street) or not postcode or not town or street.startswith(("postboks", "pb ")):
+            continue
+        i = low.find(street)
+        if i >= 0 and re.search(r"(?<!\d)" + postcode + r"(?!\d)", text) and town in low:
+            return i, i + len(street)
     return None
 
 
@@ -368,6 +400,8 @@ def discover_and_verify(ctx: dict, fetcher: Fetcher, ledger: Ledger, deadline: f
                     break
             if not proof or proof.get("reject") or visit_proof is None:
                 record["result"] = (proof or {}).get("level", "no_identity_proof")
+                if cand["origin"] == "registry_website":
+                    ctx["registry_site_unproven"] = {"url": visit.snap.final_url or cand["url"], "result": record["result"], "visit": visit}
                 level = (proof or {}).get("level")
                 genuine = level in ("name_only", "group_listing", "holding_without_own_name_on_site", "managed_entity_without_own_domain") or \
                     (level == "site_names_other_entity" and cand["origin"] in ("registry_website", "registry_email_domain"))
@@ -391,12 +425,18 @@ def discover_and_verify(ctx: dict, fetcher: Fetcher, ledger: Ledger, deadline: f
                 field = "$.hjemmeside" if cand["origin"] == "registry_website" else "$.epostadresse"
                 support.append(ledger.add_evidence(reg_snap, source_class="official_registry", method="json_path",
                                                    span=f"{field} = {ctx.get('website') if field == '$.hjemmeside' else ctx.get('email')}"))
+        if cand["origin"] == "wikidata_website" and (ctx.get("wikidata") or {}).get("snapshot") is not None:
+            wd = ctx["wikidata"]
+            support.append(ledger.add_evidence(wd["snapshot"], source_class="open_knowledge_base_cc0", method="sparql",
+                                               source_url=wd["item"], span=f"{wd['item']} P2333 = {ctx['organisation_number']}; P856 = {cand['url']}"))
         confidence = 0.99 if proof["level"] in ("organisation_number_on_page", "registry_phone_on_page", "registry_email_on_page") else 0.95
         ledger.claim("web_presence", "official_website", home, support, confidence=confidence, key="official_website",
                      note=f"discovered via {cand['origin']}; identity proof: {proof['level']}")
         return {"home": home, "domain": registered_domain(parts.hostname or ""), "visits": pages_checked, "origin": cand["origin"],
                 "proof": proof["level"]}
     checked = [c["url"] for c in ctx["website_candidates"]]
+    if _publish_registry_declared(ctx, ledger):
+        return None
     if ctx.get("registry_site_blocked"):
         return None
     if ctx.get("ambiguous_sites"):
@@ -406,6 +446,49 @@ def discover_and_verify(ctx: dict, fetcher: Fetcher, ledger: Ledger, deadline: f
     else:
         ledger.mark("official_website", "not_available", "no verifiable company-owned website found", checked=checked)
     return None
+
+
+REGISTRY_DECLARED_OK = ("blocked_by_robots", "no_identity_proof", "no_norwegian_context", "site_names_other_entity")
+WEBSITE_DEPENDENT = ("public_brand", "website_locations", "people_on_website", "social_profile", "company_news")
+
+
+def _publish_registry_declared(ctx: dict, ledger: Ledger) -> bool:
+    """The register itself names the company's homepage, but the page carries no exact identity proof.
+
+    Publish the domain as the registry-declared website (labelled, lower confidence) and do not extract
+    company-owned content from it: the page may belong to a chain, group or franchise brand.
+    Parked, unreachable and manager-run (housing cooperative, co-ownership, foundation) domains stay unpublished.
+    """
+    reg_snap = ctx.get("entity_snapshot")
+    if reg_snap is None or not ctx.get("website"):
+        return False
+    if ctx.get("registry_site_blocked"):
+        url, result, visit = ctx["registry_site_blocked"], "blocked_by_robots", None
+    elif ctx.get("registry_site_unproven"):
+        info = ctx["registry_site_unproven"]
+        url, result, visit = info["url"], info["result"], info["visit"]
+    else:
+        return False
+    if result not in REGISTRY_DECLARED_OK or _managed_entity(ctx):
+        return False
+    parts = urllib.parse.urlsplit(url)
+    declared = urllib.parse.urlsplit(_normalise_site_url(ctx["website"]) or "").hostname or ""
+    if not parts.hostname or registered_domain(parts.hostname) != registered_domain(declared):
+        return False  # the declared domain now redirects elsewhere (sold, merged or expired)
+    home = f"{parts.scheme}://{parts.hostname}/"
+    support = [ledger.add_evidence(reg_snap, source_class="official_registry", method="json_path", span=f"$.hjemmeside = {ctx['website']}")]
+    if visit is not None and visit.snap.ok:
+        support.append(ledger.add_evidence(visit.snap, source_class="company_website_unverified", method="http_get",
+                                           span=f"page reachable; title “{visit.page.title[:120]}”; identity check: {result}"))
+    ledger.claim("web_presence", "official_website", home, support, confidence=0.8, key="official_website", relation="registry_declared",
+                 note=f"declared as homepage in Enhetsregisteret; no page-level identity proof ({result}); company-owned content not extracted")
+    state = "blocked" if result == "blocked_by_robots" else "not_available"
+    reason = ("registry-declared website disallows automated access (robots.txt)" if state == "blocked" else
+              "registry-declared website has no page-level identity proof, so its content is not attributed to this entity")
+    for family in WEBSITE_DEPENDENT:
+        ledger.mark(family, state, reason)
+    ctx["website_relation"] = "registry_declared"
+    return True
 
 
 # ----------------------------------------------------------------------------------------------

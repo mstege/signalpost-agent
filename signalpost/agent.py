@@ -29,6 +29,12 @@ FAMILIES = {
     "company_news": ("activity", ["company_news"]),
     "registry_event": ("activity", ["registry_event"]),
 }
+FAMILY_LABELS = {
+    "public_brand": "public brand", "contact_details": "contact details", "annual_accounts": "structured annual accounts",
+    "leadership": "registered leadership", "registered_workplace": "registered workplaces", "website_locations": "locations on the website",
+    "people_on_website": "people named on the website", "official_website": "official website", "social_profile": "company-owned social profiles",
+    "job_posting": "job postings", "company_news": "dated company news", "registry_event": "dated register events",
+}
 DEPENDS_ON_WEBSITE = {"public_brand", "website_locations", "people_on_website", "social_profile", "company_news"}
 
 
@@ -48,7 +54,7 @@ class Work:
 
 
 def research_company(org: str, *, fetcher: Fetcher, bulk: BulkRegistry | None, previous: dict | None, budget_seconds: float,
-                     global_deadline: float, use_sites: bool = True) -> Work:
+                     global_deadline: float, use_sites: bool = True, wikidata: dict | None = None) -> Work:
     """Phase 1: official records, website discovery and crawl."""
     work = Work(org)
     work.previous = previous
@@ -57,6 +63,8 @@ def research_company(org: str, *, fetcher: Fetcher, bulk: BulkRegistry | None, p
     try:
         work.ctx = fetch_registry(org, fetcher, ledger, bulk)
         ctx = work.ctx
+        if wikidata:
+            ctx["wikidata"] = wikidata
         if ctx.get("entity"):
             official_events(ctx, ledger)
             site = None
@@ -93,7 +101,7 @@ def finalize_company(work: Work, *, run_id: str, nav: NavJobIndex | None, deadli
     completed_wall = utc_now()
     changes, refresh_meta = diff(ledger, work.previous, completed_wall)
     try:
-        synthesis = build_synthesis(ctx, ledger, changes)
+        synthesis = build_synthesis(ctx, ledger, changes, today=completed_wall[:10])
     except Exception as exc:  # noqa: BLE001
         synthesis = {"summary": "", "sentences": [], "error": f"{type(exc).__name__}: {exc}"}
     return assemble(work.org, ledger, ctx, run_id=run_id, started=work.started_wall, completed=completed_wall, terminal=work.terminal,
@@ -150,6 +158,12 @@ def assemble(org: str, ledger: Ledger, ctx: dict, *, run_id: str, started: str, 
                            "state": "available", "changes": len(changes),
                            "material_changes": sum(1 for c in changes if c["materiality"] == "material")}
     legal = ctx.get("entity") or {}
+    if legal and isinstance(synthesis, dict) and "error" not in synthesis:
+        synthesis = dict(synthesis)
+        synthesis["unknowns"] = [{"family": f, "state": info["state"],
+                                  "text": f"{FAMILY_LABELS.get(f, f.replace('_', ' '))}: {info['state'].replace('_', ' ')}"
+                                          + (f" – {info['reason']}" if info.get("reason") else "")}
+                                 for f, info in families.items() if info["state"] != "available"]
     if terminal == "failed" and not legal:
         overall = "failed"
     else:

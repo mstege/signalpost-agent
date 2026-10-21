@@ -9,11 +9,12 @@ from pathlib import Path
 from signalpost.agent import assemble, family_states
 from signalpost.cli import read_inputs
 from signalpost.evidence import Ledger
-from signalpost.names import core_name, domain_candidates, name_in_text, orgnrs_in, phone_digits, valid_orgnr
+from signalpost.names import core_name, domain_candidates, full_name_in_text, name_in_text, orgnrs_in, phone_digits, valid_orgnr
 from signalpost.net import Snapshot, check_url, UrlPolicyError
 from signalpost.page import Page
 from signalpost.refresh import diff
-from signalpost.website import SiteVisit, _proof, _extract
+from signalpost.synthesis import build_synthesis, derived_metrics, key_points
+from signalpost.website import SiteVisit, _proof, _extract, _publish_registry_declared
 
 ORG = "810034882"
 
@@ -104,6 +105,85 @@ class IdentityGateTest(unittest.TestCase):
         v = visit("https://sandneselektriske.no/", html)
         proof = _proof(ctx(phone=None, email=None), v, "name_guess", "sandneselektriske.no")
         self.assertEqual(proof["level"], "legal_name_and_registered_leader_on_page")
+
+
+    def test_registered_name_with_legal_form_on_name_domain(self):
+        html = "<html lang='no'><body>Velkommen! Sandnes Elektriske AS leverer elektrikertjenester.</body></html>"
+        v = visit("https://sandneselektriske.no/", html)
+        proof = _proof(ctx(phone=None, email=None, roles=[]), v, "name_guess", "sandneselektriske.no")
+        self.assertEqual(proof["level"], "registered_name_with_legal_form_on_name_domain")
+        # the core name alone, or a longer sister name, is not enough
+        v2 = visit("https://sandneselektriske.no/", "<html lang='no'><body>Sandnes Elektriske Bygg AS</body></html>")
+        self.assertTrue(_proof(ctx(phone=None, email=None, roles=[]), v2, "name_guess", "sandneselektriske.no").get("reject"))
+        self.assertIsNone(full_name_in_text("SANDNES ELEKTRISKE AS", "Sandnes Elektriske ASA"))
+
+    def test_registered_address_needs_name_or_name_domain(self):
+        # parent company's site reached through the registry e-mail domain: address shared, name absent -> no proof
+        html = "<html lang='no'><body>Molde og Romsdal Havn IKS Strandgata 21 4307 Sandnes</body></html>"
+        v = visit("https://havn.no/", html)
+        proof = _proof(ctx(phone=None, email="post@havn.no", roles=[]), v, "registry_email_domain", "havn.no")
+        self.assertTrue(proof is None or proof.get("reject"))
+        html = "<html lang='no'><body>Elektrikeren i Sandnes – Strandgata 21, 4307 Sandnes</body></html>"
+        v = visit("https://sandneselektriske.no/", html)
+        proof = _proof(ctx(phone=None, roles=[]), v, "registry_email_domain", "sandneselektriske.no")
+        self.assertEqual(proof["level"], "registry_email_domain_with_registered_address")
+
+    def test_registry_declared_website_is_labelled_and_not_crawled(self):
+        reg = Snapshot("https://data.brreg.no/x", "https://data.brreg.no/x", 200, "t", content_sha256="y" * 64, content_type="application/json", text="{}")
+        page = visit("https://www.kjede.no/", "<html lang='no'><title>Kjeden</title><body>Kjeden AS</body></html>")
+        ledger = Ledger(ORG)
+        c = ctx(website="www.kjede.no", entity_snapshot=reg,
+                registry_site_unproven={"url": "https://www.kjede.no/", "result": "site_names_other_entity", "visit": page})
+        self.assertTrue(_publish_registry_declared(c, ledger))
+        site = ledger.claims_for("official_website")[0]
+        self.assertEqual(site["relation"], "registry_declared")
+        self.assertEqual(ledger.field_states["social_profile"]["state"], "not_available")
+        # redirected to another company's domain, or a housing cooperative on its manager's site: nothing is published
+        for extra in ({"registry_site_unproven": {"url": "https://nordlo.com/", "result": "no_identity_proof", "visit": page}},
+                      {"legal_name": "LYNGVEIEN BORETTSLAG", "legal_form": "BRL"}):
+            c2 = dict(c, **extra)
+            self.assertFalse(_publish_registry_declared(c2, Ledger(ORG)))
+        c3 = dict(c, registry_site_unproven={"url": "https://www.kjede.no/", "result": "parked_or_placeholder", "visit": page})
+        self.assertFalse(_publish_registry_declared(c3, Ledger(ORG)))
+
+
+class SynthesisTest(unittest.TestCase):
+    def test_derived_ratios_cite_claims_and_points_are_supported(self):
+        snap = Snapshot("https://data.brreg.no/r", "https://data.brreg.no/r", 200, "t", content_sha256="z" * 64, content_type="application/json", text="{}")
+        ledger = Ledger(ORG)
+        accounts = []
+        for year, rev, op, net, eq, assets in (("2023", 100, 10, 8, 40, 100), ("2024", 110, 12, 9, 45, 100), ("2025", 121, 14, 10, 50, 100)):
+            period = f"{year}-01-01/{year}-12-31"
+            accounts.append({"period": period, "year": year, "currency": "NOK", "revenue": rev * 1e6, "operating_result": op * 1e6,
+                             "net_result": net * 1e6, "equity": eq * 1e6, "total_assets": assets * 1e6})
+            for field, value in (("revenue", rev), ("operating_result", op), ("net_result", net), ("equity", eq), ("total_assets", assets)):
+                ev = ledger.add_evidence(snap, source_class="official_annual_accounts", method="json_path", span=f"{field}={value}")
+                ledger.claim("financials", field, {"amount": value * 1e6, "currency": "NOK", "year": year}, [ev], key=(field, period), reporting_period=period)
+        ev = ledger.add_evidence(snap, source_class="official_registry", method="json_path", span="navn")
+        ledger.claim("identity", "legal_name", "SANDNES ELEKTRISKE AS", [ev])
+        c = ctx(accounts=accounts, roles=[{"name": "Kari Nordmann", "role_code": "DAGL", "is_person": True},
+                                          {"name": "Kari Nordmann", "role_code": "LEDE", "is_person": True}])
+        metrics = {m["metric"]: m for m in derived_metrics(c, ledger)}
+        self.assertAlmostEqual(metrics["operating_margin"]["value"], 14 / 121, places=3)
+        self.assertAlmostEqual(metrics["equity_ratio"]["value"], 0.5)
+        self.assertAlmostEqual(metrics["revenue_cagr"]["value"], 0.1, places=3)
+        for m in metrics.values():
+            self.assertTrue(m["claim_ids"] and all(cid in ledger.claims for cid in m["claim_ids"]))
+        texts = [p["text"] for p in key_points(c, ledger, list(metrics.values()), "2026-10-21")]
+        self.assertIn("Profitable in every filed year shown (2023–2025).", texts)
+        self.assertTrue(any(t.startswith("Revenue is growing") for t in texts))
+        syn = build_synthesis(c, ledger, [], today="2026-10-21")
+        self.assertTrue(syn["headline"]["text"].startswith("SANDNES ELEKTRISKE AS"))
+        for item in syn["key_points"] + syn["sentences"]:
+            self.assertTrue(all(cid in ledger.claims for cid in item["claim_ids"]))
+        env = assemble(ORG, ledger, {"entity": {"navn": "SANDNES ELEKTRISKE AS"}}, run_id="r", started="t", completed="t", terminal="completed",
+                       synthesis=syn, changes=[], refresh_meta={}, operations={})
+        self.assertTrue(any(u["family"] == "official_website" for u in env["synthesis"]["unknowns"]))
+        from signalpost.viewer import company_page, index_page, summary_row
+        html = company_page(env)
+        self.assertIn("Key points", html)
+        self.assertIn("equity / total assets", html)
+        self.assertIn("Sandnes Elektriske AS".upper(), index_page([summary_row(env)], {"run_id": "r"}))
 
 
 class ExtractionTest(unittest.TestCase):

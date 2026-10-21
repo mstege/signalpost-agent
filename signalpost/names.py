@@ -53,6 +53,19 @@ def name_in_text(legal_name: str, text: str) -> bool:
     return False
 
 
+def full_name_in_text(legal_name: str, text: str) -> tuple[int, int] | None:
+    """Span of the complete registered name including its legal-form suffix (e.g. "Bokonsept AS"), case-insensitive."""
+    full = " ".join((legal_name or "").lower().split())
+    if full == core_name(legal_name).lower() or len(full) < 6:
+        return None
+    flat = " ".join((text or "").lower().split())
+    for v in {full, full.replace("&", "og"), full.replace(" og ", " & ")}:
+        m = re.search(r"(?<![a-z0-9æøå])" + re.escape(v) + r"(?![a-z0-9æøå])", flat)
+        if m:
+            return m.start(), m.end()
+    return None
+
+
 def distinctive(legal_name: str) -> bool:
     """A name is distinctive when its core has a non-generic token of length >= 4 or >= 2 tokens."""
     toks = [t for t in tokens(core_name(legal_name)) if t not in GENERIC]
