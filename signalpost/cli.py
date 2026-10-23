@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
@@ -80,7 +81,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--previous", default=None, help="previous envelopes JSONL for refresh diffs")
     p.add_argument("--state-dir", default=os.environ.get("SIGNALPOST_STATE_DIR", "state"))
     p.add_argument("--workers", type=int, default=int(os.environ.get("SIGNALPOST_WORKERS", "16")))
-    p.add_argument("--time-budget", type=float, default=float(os.environ.get("SIGNALPOST_TIME_BUDGET", "3000")),
+    p.add_argument("--request-budget", type=int, default=int(os.environ["SIGNALPOST_REQUEST_BUDGET"]) if os.environ.get("SIGNALPOST_REQUEST_BUDGET") else None,
+                   help="hard cap on HTTP attempts for the batch (default: 16 per company, i.e. 1,600 per 100 companies)")
+    p.add_argument("--time-budget", type=float, default=float(os.environ.get("SIGNALPOST_TIME_BUDGET", "2100")),
                    help="seconds for the whole batch; unfinished companies still receive a terminal envelope")
     p.add_argument("--company-budget", type=float, default=float(os.environ.get("SIGNALPOST_COMPANY_BUDGET", "75")))
     p.add_argument("--nav-window-days", type=int, default=120)
@@ -106,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     fetcher = Fetcher(gate=HostGate(per_host=2, min_interval=0.2))
     registry_gate = HostGate(per_host=8, min_interval=0.0)
     fetcher.gate = _RoutingGate(fetcher.gate, registry_gate)
+    fetcher.limit = args.request_budget if args.request_budget is not None else max(64, REQUESTS_PER_COMPANY * len(orgs))
+    fetcher.reserve = REGISTRY_CALLS_PER_COMPANY * len(orgs)
+    reserve_lock = threading.Lock()
     bulk = BulkRegistry(args.bulk, set(orgs)) if args.bulk else None
     previous = load_previous(args.previous, args.state_dir, orgs)
     wikidata_map: dict = {}
@@ -131,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
                     done[env["organisation_number"]] = env
 
     def research(org: str):
+        with reserve_lock:  # this company's registry calls now draw on the reserve kept for it
+            fetcher.reserve = max(0, fetcher.reserve - REGISTRY_CALLS_PER_COMPANY)
         if time.monotonic() > global_deadline:
             return failed_envelope(org, run_id, "batch time budget exhausted before this company started", previous.get(org))
         cf = CountingFetcher(fetcher)
@@ -191,6 +199,8 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint.unlink()
     if args.state_dir:
         save_state(args.state_dir, envelopes)
+    if nav is not None:
+        nav.save_cache()
     report = build_report(envelopes, orgs, run_id, started_at, t0, fetcher, nav, args, output)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -203,6 +213,10 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if report["validation"]["passed"] else 1
 
 
+REQUESTS_PER_COMPANY = 16       # Builderr: 2,000 requests per 100 companies; 1,600 leaves a 20 % margin
+REGISTRY_CALLS_PER_COMPANY = 4  # entity, roles, subunits, accounts
+
+
 class _RoutingGate:
     """Registry APIs get their own wider gate; everything else uses polite per-host limits."""
 
@@ -213,6 +227,10 @@ class _RoutingGate:
     def acquire(self, host: str):
         gate = self.registry if host.endswith("brreg.no") or host.endswith("nav.no") else self.default
         return gate.acquire(host)
+
+    def cool(self, host: str, seconds: float) -> None:
+        gate = self.registry if host.endswith("brreg.no") or host.endswith("nav.no") else self.default
+        gate.cool(host, seconds)
 
 
 def build_report(envelopes, orgs, run_id, started_at, t0, fetcher, nav, args, output) -> dict:
@@ -255,6 +273,10 @@ def build_report(envelopes, orgs, run_id, started_at, t0, fetcher, nav, args, ou
         "changes_total": sum(len(e["changes"]) for e in envelopes),
         "operations": {
             "requests": fetcher.requests,
+            "requests_by_source": dict(sorted(fetcher.by_source.items())),
+            "request_budget": fetcher.limit,
+            "requests_refused_by_budget": dict(sorted(fetcher.refused.items())),
+            "rate_limited_responses": fetcher.rate_limited,
             "bytes": fetcher.bytes,
             "p50_company_ms": runtimes[len(runtimes) // 2] if runtimes else None,
             "p95_company_ms": runtimes[min(len(runtimes) - 1, int(len(runtimes) * 0.95))] if runtimes else None,

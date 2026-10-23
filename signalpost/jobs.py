@@ -52,6 +52,11 @@ class NavJobIndex:
         self.by_org: dict[str, list[str]] = {}
         self.details_fetched = 0
         self.details_cached = 0
+        # Bulk resolution of every active ad costs one request per ad (~10,000), far above Builderr's budget of
+        # 2,000 requests per 100 companies. By default details are fetched only for ads whose employer name
+        # resembles a company in the batch (see research_jobs); matching itself stays exact by organisation number.
+        self.bulk_details = False
+        self._cache: dict[str, dict] = {}
 
     def start(self) -> None:
         threading.Thread(target=self._build, name="nav-index", daemon=True).start()
@@ -146,11 +151,13 @@ class NavJobIndex:
                 cache[uuid] = {"modified": self.active[uuid].get("modified"), "orgnr": orgnr}
             self._register(uuid, orgnr)
 
-        with ThreadPoolExecutor(max_workers=self.detail_workers) as pool:
-            list(pool.map(one, todo))
-        if len(todo) and self.details_fetched < len(todo):
-            self.error = (self.error or "") + f" details resolved for {self.details_fetched}/{len(todo)} uncached ads"
-        if self.cache_path:
+        if self.bulk_details:
+            with ThreadPoolExecutor(max_workers=self.detail_workers) as pool:
+                list(pool.map(one, todo))
+            if len(todo) and self.details_fetched < len(todo):
+                self.error = (self.error or "") + f" details resolved for {self.details_fetched}/{len(todo)} uncached ads"
+        self._cache = cache
+        if self.cache_path and self.bulk_details:
             live = {u: v for u, v in cache.items() if u in self.active}
             try:
                 os.makedirs(os.path.dirname(self.cache_path) or ".", exist_ok=True)
@@ -181,10 +188,46 @@ class NavJobIndex:
         snap = self.fetcher.get(self.active[uuid]["url"], accept="application/json", headers=self._headers(), check_robots=False)
         with self._lock:
             self._details[uuid] = snap
+            if snap.ok:
+                self.details_fetched += 1
         return snap
 
+    def name_candidates(self, names: list[str], limit: int) -> list[str]:
+        """Active ads whose employer name matches a company name: exact, then prefix, then same first word."""
+        exact, prefix, first = [], [], []
+        for name in names:
+            key = norm(name)
+            words = key.split()
+            if not words or len(words[0]) < 3:
+                continue
+            for business in self.by_first.get(words[0], []):
+                bucket = exact if business == key else prefix if business.startswith(key + " ") or key.startswith(business + " ") else first
+                bucket.extend(self.by_name[business])
+        return list(dict.fromkeys(exact + prefix + first))[:limit]
 
-def research_jobs(ctx: dict, index: NavJobIndex, ledger: Ledger, deadline: float, max_details: int = 25) -> None:
+    def save_cache(self) -> None:
+        """Remember resolved employer numbers across runs (refreshes then cost fewer requests)."""
+        if not self.cache_path:
+            return
+        with self._lock:
+            live = {u: v for u, v in self._cache.items() if u in self.active}
+            for uuid, snap in self._details.items():
+                if snap.ok and uuid in self.active:
+                    try:
+                        orgnr = re.sub(r"\D", "", str(((snap.json().get("ad_content") or {}).get("employer") or {}).get("orgnr") or ""))
+                    except ValueError:
+                        continue
+                    live[uuid] = {"modified": self.active[uuid].get("modified"), "orgnr": orgnr}
+        try:
+            os.makedirs(os.path.dirname(self.cache_path) or ".", exist_ok=True)
+            with open(self.cache_path + ".tmp", "w", encoding="utf-8") as handle:
+                json.dump(live, handle)
+            os.replace(self.cache_path + ".tmp", self.cache_path)
+        except OSError:
+            pass
+
+
+def research_jobs(ctx: dict, index: NavJobIndex, ledger: Ledger, deadline: float, max_details: int = 30) -> None:
     if not index.ready.wait(timeout=max(0.0, deadline - time.monotonic())):
         ledger.mark("nav_job_posting", "failed", "NAV job index not ready within the company time budget")
         return
@@ -200,7 +243,7 @@ def research_jobs(ctx: dict, index: NavJobIndex, ledger: Ledger, deadline: float
     found = 0
     today = datetime.now(timezone.utc).date().isoformat()
     exact = [u for o in [org] + sorted(subunit_orgs) for u in index.by_org.get(o, [])]
-    by_name = [u for u in index.candidates(names) if u not in exact][:max_details]
+    by_name = [u for u in index.name_candidates(names, limit=max_details + len(exact)) if u not in exact][:max_details]
     for uuid in list(dict.fromkeys(exact))[:60] + by_name:
         if time.monotonic() > deadline:
             break

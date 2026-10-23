@@ -25,6 +25,8 @@ USER_AGENT = "SignalpostResearchAgent/1.0 (+https://github.com/mstege/signalpost
 ROBOTS_AGENT = "SignalpostResearchAgent"
 MAX_BYTES = 2_500_000
 MAX_REDIRECTS = 5
+MAX_RESPONSE_SECONDS = 20.0   # wall-clock limit for reading one response body
+MAX_RETRY_WAIT = 30.0         # a longer Retry-After means: do not ask this host again during the run
 ALLOWED_PORTS = {None, 80, 443}
 
 
@@ -49,6 +51,7 @@ class Snapshot:
     error: str | None = None
     elapsed_ms: int = 0
     bytes: int = 0
+    retry_after: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -143,6 +146,11 @@ class HostGate:
             time.sleep(wait)
         return sem
 
+    def cool(self, host: str, seconds: float) -> None:
+        """Push the next request start for a host into the future (after 429/503), never by more than 60 s."""
+        with self._lock:
+            self._last[host] = max(self._last.get(host, 0), time.monotonic() + min(max(seconds, 0.0), 60.0))
+
 
 class Fetcher:
     def __init__(self, *, timeout: float = 10.0, respect_robots: bool = True, gate: HostGate | None = None):
@@ -154,6 +162,12 @@ class Fetcher:
         self._count_lock = threading.Lock()
         self.requests = 0
         self.bytes = 0
+        self.by_source: dict[str, int] = {}
+        self.limit: int | None = None   # hard cap on HTTP attempts for the whole run (None = unlimited)
+        self.reserve = 0                # attempts kept free for registry calls of companies not yet started
+        self.refused: dict[str, int] = {}
+        self.rate_limited = 0
+        self._blocked: dict[str, float] = {}
 
     # robots.txt ---------------------------------------------------------
     def robots_allowed(self, url: str) -> bool:
@@ -203,8 +217,43 @@ class Fetcher:
             return snap
         return Snapshot(url, current, 0, utc_now(), error="too_many_redirects", redirects=redirects)
 
+    def _admit(self, source: str) -> bool:
+        """Count one HTTP attempt against the run budget. Registry calls may use the reserve; nothing may pass the cap."""
+        with self._count_lock:
+            if self.limit is not None:
+                ceiling = self.limit if source == "brreg" else self.limit - self.reserve
+                if self.requests >= ceiling:
+                    self.refused[source] = self.refused.get(source, 0) + 1
+                    return False
+            self.requests += 1
+            self.by_source[source] = self.by_source.get(source, 0) + 1
+            return True
+
     def _raw_get(self, url: str, *, accept: str, headers: dict | None = None, max_bytes: int = MAX_BYTES) -> Snapshot:
+        """One HTTP attempt, plus at most one retry after a short 429/503 back-off."""
         host = urllib.parse.urlsplit(url).hostname or ""
+        with self._count_lock:
+            blocked = self._blocked.get(host, 0) > time.monotonic()
+        if blocked:
+            return Snapshot(url, url, 0, utc_now(), error="rate_limited: host asked to wait longer than this run allows")
+        snap = self._attempt(url, accept=accept, headers=headers, max_bytes=max_bytes)
+        if snap.status not in (429, 503):
+            return snap
+        with self._count_lock:
+            self.rate_limited += 1
+        wait = snap.retry_after
+        if wait > MAX_RETRY_WAIT:
+            with self._count_lock:
+                self._blocked[host] = time.monotonic() + min(wait, 3600.0)
+            return snap
+        if hasattr(self.gate, "cool"):
+            self.gate.cool(host, max(wait, 1.0))   # the retry waits in the host gate, without holding a slot
+        return self._attempt(url, accept=accept, headers=headers, max_bytes=max_bytes)
+
+    def _attempt(self, url: str, *, accept: str, headers: dict | None = None, max_bytes: int = MAX_BYTES) -> Snapshot:
+        host = urllib.parse.urlsplit(url).hostname or ""
+        if not self._admit(source_of(host)):
+            return Snapshot(url, url, 0, utc_now(), error="request_budget_exhausted")
         req_headers = {"User-Agent": USER_AGENT, "Accept": accept, "Accept-Language": "nb-NO,nb;q=0.9,no;q=0.8,en;q=0.6",
                        "Accept-Encoding": "gzip, deflate"}
         req_headers.update(headers or {})
@@ -213,7 +262,7 @@ class Fetcher:
         retrieved_at = utc_now()
         try:
             with _opener.open(request, timeout=self.timeout) as response:
-                raw = response.read(max_bytes + 1)
+                raw = _read_limited(response, max_bytes + 1, time.monotonic() + MAX_RESPONSE_SECONDS)
                 status = response.status
                 ctype = response.headers.get("Content-Type", "")
                 encoding = response.headers.get("Content-Encoding", "")
@@ -226,7 +275,10 @@ class Fetcher:
             except Exception:  # noqa: BLE001
                 raw = b""
             self._count(len(raw))
-            return Snapshot(url, url, exc.code, retrieved_at, content_sha256=sha256(raw), error=f"HTTP {exc.code}")
+            snap = Snapshot(url, url, exc.code, retrieved_at, content_sha256=sha256(raw), error=f"HTTP {exc.code}")
+            if exc.code in (429, 503):
+                snap.retry_after = _retry_after(exc.headers.get("Retry-After") if exc.headers else None)
+            return snap
         except Exception as exc:  # noqa: BLE001 - any transport problem becomes a recorded fetch error
             reason = getattr(exc, "reason", exc)
             return Snapshot(url, url, 0, retrieved_at, error=f"{type(exc).__name__}: {str(reason)[:120]}")
@@ -248,8 +300,46 @@ class Fetcher:
 
     def _count(self, nbytes: int) -> None:
         with self._count_lock:
-            self.requests += 1
             self.bytes += nbytes
+
+
+def _read_limited(response, limit: int, deadline: float) -> bytes:
+    """Read at most `limit` bytes and stop at `deadline`, so a server that trickles bytes cannot hold a worker."""
+    chunks, size = [], 0
+    while size < limit:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"response took longer than {MAX_RESPONSE_SECONDS:.0f} s")
+        chunk = response.read(min(65536, limit - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
+def source_of(host: str) -> str:
+    host = (host or "").lower()
+    if host.endswith("brreg.no"):
+        return "brreg"
+    if host.endswith("nav.no"):
+        return "nav"
+    if host.endswith("wikidata.org"):
+        return "wikidata"
+    return "web"
+
+
+def _retry_after(value: str | None) -> float:
+    """Seconds from a Retry-After header (delta seconds or HTTP date); 5 s when absent or unreadable."""
+    if not value:
+        return 5.0
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        from email.utils import parsedate_to_datetime
+        return max(0.0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError):
+        return 5.0
 
 
 def decode(raw: bytes, content_type: str) -> str:

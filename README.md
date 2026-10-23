@@ -45,8 +45,9 @@ Outputs:
 The process exits 0 only when the batch contract validates (one envelope per input, unique
 numbers, valid states, every available claim backed by evidence with source and time).
 
-Useful options (all have defaults): `--workers 16`, `--time-budget 3000` (seconds for the whole
-batch; unfinished companies still receive a terminal `failed` envelope), `--company-budget 75`,
+Useful options (all have defaults): `--workers 16`, `--request-budget N` (hard cap on HTTP attempts
+for the batch; default 16 per company), `--time-budget 2100` (seconds for the whole batch;
+unfinished companies still receive a terminal `failed` envelope), `--company-budget 75`,
 `--previous prior.jsonl` (explicit previous snapshot), `--bulk brreg.csv.gz` (frozen Brreg entity
 snapshot used if the live API fails), `--no-nav`, `--expected-count N`. Starter-kit argument names
 (`--organisations`, `--output`, `--report`, `--run-id`, `--profiles-output`) are accepted.
@@ -69,9 +70,11 @@ Tests (offline): `python3 -m unittest discover -s tests`
    the site, contact e-mail/phone, visiting addresses, public brand, self-description,
    registered leaders confirmed on the site, named people with titles, careers pages and job
    links, dated news (RSS/Atom, article metadata, dated URLs).
-6. **Jobs from NAV** — the public NAV job feed (arbeidsplassen.nav.no). Every active ad's
-   employer organisation number is resolved once per run (cached across runs), and ads are
-   matched to the company or one of its registered subunits by number.
+6. **Jobs from NAV** — the public NAV job feed (arbeidsplassen.nav.no). The run walks the feed of
+   active ads once; for each company it fetches the details of at most 30 ads whose employer name
+   resembles the company or one of its registered subunits, and matches an ad only through the
+   employer organisation number in those details (or the full legal name when NAV omits the
+   number). Resolved numbers are cached across runs.
 7. **Synthesis** — a one-line headline, decision-useful key points (profit history, revenue
    trend, equity buffer, stale filings, register status, CEO/chair structure, recent leadership
    register updates, workplaces, hiring, recent news, web footprint, holding/property context),
@@ -154,12 +157,20 @@ at 2.5 MB; at most five redirects. **Secrets:** none are needed; the only option
 `NAV_FEED_TOKEN`. **Caches:** `state/` holds previous envelopes and a map from NAV ad id to
 employer organisation number; both are optional and rebuilt when absent.
 
-## Cost and runtime
+## Cost, request budget and runtime
 
 - Third-party API cost: **USD 0** (no paid APIs, no model calls).
-- Measured locally (16 workers): 200 companies in about 2.5 minutes of company research; the
-  NAV ad index (≈ 9,600 active ads) builds in parallel in about 5 minutes on a cold cache.
-  A 1,000-company batch is expected to finish well within one hour.
+- **Request budget.** Builderr allows 2,000 requests per 100 companies. The agent counts every HTTP
+  attempt (redirect hops, robots.txt, retries and failed attempts included) and enforces a hard cap
+  of 16 per company (1,600 per 100 companies, a 20 % margin; `--request-budget` overrides it).
+  Four requests per company that has not started yet stay reserved for the official registers.
+  When the cap is reached, optional sources (company websites, NAV, Wikidata) are refused first:
+  the affected families get an explicit state, and every company still receives its envelope
+  with registry facts. `run-report.json` lists requests by source and any refused requests.
+- **Rate limits.** HTTP 429/503 answers are honoured: the agent waits for `Retry-After` (up to 30 s),
+  retries once and slows down further requests to that host.
+- **Time budget.** Default 2,100 s for the whole batch (below Builderr's 45 minutes).
+- Measured runtimes and request counts: see `reports/smoke-100/README.md`.
 
 ## Limitations
 

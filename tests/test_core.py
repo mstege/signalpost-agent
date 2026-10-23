@@ -56,6 +56,50 @@ class NamesTest(unittest.TestCase):
         self.assertIsNone(phone_digits("123"))
 
 
+class BudgetTest(unittest.TestCase):
+    def test_cap_and_registry_reserve(self):
+        from signalpost.net import Fetcher
+        f = Fetcher()
+        f.limit, f.reserve = 10, 4
+        self.assertTrue(all(f._admit("web") for _ in range(6)))   # 10 - 4 reserved
+        self.assertFalse(f._admit("web"))
+        self.assertFalse(f._admit("nav"))
+        self.assertTrue(all(f._admit("brreg") for _ in range(4)))  # registry may use the reserve
+        self.assertFalse(f._admit("brreg"))                        # nothing passes the hard cap
+        self.assertEqual(f.requests, 10)
+        self.assertEqual(f.by_source, {"web": 6, "brreg": 4})
+        self.assertEqual(f.refused, {"web": 1, "nav": 1, "brreg": 1})
+        snap = f._raw_get("https://example.no/", accept="text/html")
+        self.assertEqual(snap.error, "request_budget_exhausted")
+
+    def test_rate_limit_backoff(self):
+        from signalpost.net import Fetcher, Snapshot
+        calls = []
+
+        def fake(url, **kw):
+            calls.append(url)
+            snap = Snapshot(url, url, 503 if "slow" in url else (429 if len(calls) == 1 else 200), "t", text="ok")
+            snap.retry_after = 3600.0 if "slow" in url else 0.0
+            return snap
+        f = Fetcher()
+        f._attempt = fake
+        self.assertEqual(f._raw_get("https://busy.no/", accept="*/*").status, 200)   # short wait: one retry
+        self.assertEqual(len(calls), 2)
+        start = __import__("time").monotonic()
+        self.assertEqual(f._raw_get("https://slow.no/", accept="*/*").status, 503)  # long wait: no sleeping
+        self.assertIn("rate_limited", f._raw_get("https://slow.no/x", accept="*/*").error)  # host skipped afterwards
+        self.assertLess(__import__("time").monotonic() - start, 2.0)
+        self.assertEqual(len(calls), 3)
+
+    def test_retry_after(self):
+        from signalpost.net import _retry_after, source_of
+        self.assertEqual(_retry_after("12"), 12.0)
+        self.assertEqual(_retry_after(None), 5.0)
+        self.assertEqual(_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), 0.0)
+        self.assertEqual([source_of(h) for h in ("data.brreg.no", "pam-stilling-feed.nav.no", "query.wikidata.org", "firma.no")],
+                         ["brreg", "nav", "wikidata", "web"])
+
+
 class UrlPolicyTest(unittest.TestCase):
     def test_rejects_private_and_odd_urls(self):
         for url in ("file:///etc/passwd", "http://127.0.0.1/", "http://localhost/", "http://user:pw@example.com/", "http://10.0.0.1:8080/"):
