@@ -111,7 +111,6 @@ def main(argv: list[str] | None = None) -> int:
     fetcher.gate = _RoutingGate(fetcher.gate, registry_gate)
     fetcher.limit = args.request_budget if args.request_budget is not None else max(64, REQUESTS_PER_COMPANY * len(orgs))
     fetcher.reserve = REGISTRY_CALLS_PER_COMPANY * len(orgs)
-    reserve_lock = threading.Lock()
     bulk = BulkRegistry(args.bulk, set(orgs)) if args.bulk else None
     previous = load_previous(args.previous, args.state_dir, orgs)
     wikidata_map: dict = {}
@@ -137,8 +136,6 @@ def main(argv: list[str] | None = None) -> int:
                     done[env["organisation_number"]] = env
 
     def research(org: str):
-        with reserve_lock:  # this company's registry calls now draw on the reserve kept for it
-            fetcher.reserve = max(0, fetcher.reserve - REGISTRY_CALLS_PER_COMPANY)
         if time.monotonic() > global_deadline:
             return failed_envelope(org, run_id, "batch time budget exhausted before this company started", previous.get(org))
         cf = CountingFetcher(fetcher)

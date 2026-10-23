@@ -225,6 +225,8 @@ class Fetcher:
                 if self.requests >= ceiling:
                     self.refused[source] = self.refused.get(source, 0) + 1
                     return False
+            if source == "brreg" and self.reserve > 0:
+                self.reserve -= 1  # a registry call uses up one reserved slot
             self.requests += 1
             self.by_source[source] = self.by_source.get(source, 0) + 1
             return True
