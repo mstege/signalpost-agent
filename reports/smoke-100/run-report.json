@@ -1,9 +1,9 @@
 {
-  "run_id": "run-20261021T143951Z",
+  "run_id": "run-20261023T091631Z",
   "agent": "signalpost-agent 0.2.0",
-  "started_at": "2026-10-21T14:39:51Z",
-  "completed_at": "2026-10-21T14:45:29Z",
-  "runtime_seconds": 337.8,
+  "started_at": "2026-10-23T09:16:31Z",
+  "completed_at": "2026-10-23T09:17:40Z",
+  "runtime_seconds": 68.3,
   "input_count": 100,
   "emitted_envelopes": 100,
   "output": "../out/envelopes.jsonl",
@@ -73,24 +73,33 @@
   "claims_total": 4787,
   "changes_total": 0,
   "operations": {
-    "requests": 10705,
-    "bytes": 192609656,
-    "p50_company_ms": 2940,
-    "p95_company_ms": 42635,
+    "requests": 1073,
+    "requests_by_source": {
+      "brreg": 400,
+      "nav": 268,
+      "web": 404,
+      "wikidata": 1
+    },
+    "request_budget": 1600,
+    "requests_refused_by_budget": {},
+    "rate_limited_responses": 0,
+    "bytes": 130414710,
+    "p50_company_ms": 3057,
+    "p95_company_ms": 42464,
     "third_party_cost_usd": 0.0,
     "nav_index": {
       "state": "ready",
       "pages": 214,
-      "active_ads": 9824,
-      "details_fetched": 9824,
+      "active_ads": 9921,
+      "details_fetched": 53,
       "details_cached": 0,
-      "employers": 6073,
+      "employers": 0,
       "error": null
     }
   },
   "settings": {
     "workers": 16,
-    "time_budget_s": 3000.0,
+    "time_budget_s": 2100.0,
     "company_budget_s": 75.0,
     "nav_window_days": 120,
     "bulk_snapshot": false

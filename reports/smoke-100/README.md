@@ -1,18 +1,19 @@
 # 100-company smoke test
 
-- Agent commit: `df43f4b` (cloned into an empty folder, fresh Python 3.12 virtual environment, no install step)
+- Agent commit: `dbdf757` (cloned into an empty folder, fresh Python 3.12 virtual environment, no install step)
 - Command: `./run.sh reports/smoke-100/smoke-companies.jsonl <out>`
 - Input: `smoke-companies.jsonl` - 100 organisation numbers drawn uniformly at random (seed 20261020) from the public
   411,160-company universe (`signalpost-company-universe-2025.jsonl.gz`)
-- Run: `run-20261021T143951Z`, 2026-10-21T14:39:51Z to 2026-10-21T14:45:29Z (337.8 s, cold caches)
+- Run: `run-20261023T091631Z`, 2026-10-23T09:16:31Z to 2026-10-23T09:17:40Z (68.3 s, cold caches)
 
 ## Contract
 
 - Envelopes emitted: **100 / 100** (one per input, input order); validation passed: **True**
 - Envelope states: {'available': 100}; terminal status: {'completed': 100}
 - Published claims: 4787; every available claim has evidence with source URL and retrieval time
-- Requests: 10705 (including NAV ad lookups that build the shared job index once per batch); third-party cost: USD 0.0
-- Per-company runtime: p50 2940 ms, p95 42635 ms
+- HTTP attempts (redirects, robots.txt, retries and failures included): **1073** of a budget of 1600 (Builderr: 2,000 per 100 companies); by source: brreg 400, nav 268, web 404, wikidata 1; refused by the budget: 0; 429/503 answers: 0
+- NAV: 214 feed pages, 53 ad details; third-party cost: USD 0.0
+- Per-company runtime: p50 3057 ms, p95 42464 ms
 
 ## Availability by information family (number of companies)
 
@@ -34,3 +35,7 @@
 
 Files: `envelopes.jsonl` (results), `run-report.json` (machine-readable report), `site/index.html` (static viewer).
 These outputs only show that the agent runs end to end; Builderr scores fresh official batches.
+## Budget checks (same commit, same fresh clone)
+
+- 1,000 random companies from the public universe: 1000/1000 envelopes, validation passed: True, 394.8 s, 9726 HTTP attempts of a budget of 16000 (brreg 4001, nav 1066, web 4654, wikidata 5), 11 answers with 429/503 handled by back-off.
+- Stress test, the same 100 companies with `--request-budget 500`: 100/100 envelopes ({'completed': 100}), 500 attempts (brreg 400, nav 22, web 77, wikidata 1); refused: nav 1, web 265. All registry calls ran (annual accounts and leadership for every company); only optional website and NAV calls were dropped.
