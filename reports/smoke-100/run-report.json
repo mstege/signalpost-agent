@@ -1,12 +1,12 @@
 {
-  "run_id": "run-20261023T091631Z",
+  "run_id": "run-20261024T095613Z",
   "agent": "signalpost-agent 0.2.0",
-  "started_at": "2026-10-23T09:16:31Z",
-  "completed_at": "2026-10-23T09:17:40Z",
-  "runtime_seconds": 68.3,
+  "started_at": "2026-10-24T09:56:13Z",
+  "completed_at": "2026-10-24T09:57:18Z",
+  "runtime_seconds": 64.7,
   "input_count": 100,
   "emitted_envelopes": 100,
-  "output": "../out/envelopes.jsonl",
+  "output": "/Users/mstege/Developer/missions-work/signalpost/fresh-v4/out/envelopes.jsonl",
   "envelope_states": {
     "available": 100
   },
@@ -52,8 +52,8 @@
       "ambiguous": 7
     },
     "social_profile": {
-      "available": 8,
-      "not_available": 85,
+      "not_available": 86,
+      "available": 7,
       "ambiguous": 7
     },
     "job_posting": {
@@ -70,28 +70,28 @@
     }
   },
   "companies_with_verified_website": 15,
-  "claims_total": 4787,
+  "claims_total": 4784,
   "changes_total": 0,
   "operations": {
-    "requests": 1073,
+    "requests": 1074,
     "requests_by_source": {
       "brreg": 400,
-      "nav": 268,
-      "web": 404,
+      "nav": 267,
+      "web": 406,
       "wikidata": 1
     },
     "request_budget": 1600,
     "requests_refused_by_budget": {},
     "rate_limited_responses": 0,
-    "bytes": 130414710,
-    "p50_company_ms": 3057,
-    "p95_company_ms": 42464,
+    "bytes": 132607096,
+    "p50_company_ms": 2637,
+    "p95_company_ms": 42419,
     "third_party_cost_usd": 0.0,
     "nav_index": {
       "state": "ready",
       "pages": 214,
-      "active_ads": 9921,
-      "details_fetched": 53,
+      "active_ads": 9950,
+      "details_fetched": 52,
       "details_cached": 0,
       "employers": 0,
       "error": null
