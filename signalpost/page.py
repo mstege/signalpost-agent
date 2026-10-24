@@ -20,6 +20,7 @@ class _Parser(HTMLParser):
         self.jsonld_raw: list[str] = []
         self.times: list[dict] = []
         self.feeds: list[str] = []
+        self.hreflangs: list[str] = []
         self.title = ""
         self.lang = ""
         self._skip = 0
@@ -31,6 +32,7 @@ class _Parser(HTMLParser):
         self._headings: list[str] = []
         self._in_heading = 0
         self._heading_buf: list[str] = []
+        self._zones: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         a = {k.lower(): (v or "") for k, v in attrs}
@@ -56,12 +58,19 @@ class _Parser(HTMLParser):
                 self.feeds.append(a["href"])
             if "canonical" in rel and a.get("href"):
                 self.meta.setdefault("canonical", a["href"])
+            if "alternate" in rel and a.get("hreflang"):
+                self.hreflangs.append(a["hreflang"].lower())
+        elif tag in ("nav", "header", "footer"):
+            self._zones.append(tag)
         elif tag == "a":
-            link = {"href": a.get("href", ""), "text": [], "aria": a.get("aria-label", "") or a.get("title", "")}
+            # zone: innermost nav/header/footer around the link, "main" otherwise
+            link = {"href": a.get("href", ""), "text": [], "aria": a.get("aria-label", "") or a.get("title", ""),
+                    "zone": self._zones[-1] if self._zones else "main"}
             self._link_stack.append(link)
             self.links.append(link)
         elif tag == "time":
-            item = {"datetime": a.get("datetime", ""), "text": []}
+            item = {"datetime": a.get("datetime", ""), "text": [],
+                    "kind": " ".join([a.get("itemprop", ""), a.get("class", ""), "pubdate" if "pubdate" in a else ""]).lower()}
             self._time_stack.append(item)
             self.times.append(item)
         elif tag in ("h1", "h2", "h3", "h4"):
@@ -82,6 +91,9 @@ class _Parser(HTMLParser):
             return
         if tag == "title":
             self._in_title = False
+        elif tag in ("nav", "header", "footer") and tag in self._zones:
+            while self._zones and self._zones.pop() != tag:
+                pass
         elif tag == "a" and self._link_stack:
             self._link_stack.pop()
         elif tag == "time" and self._time_stack:
@@ -137,9 +149,11 @@ class Page:
                 continue
             absolute = href if href.startswith(("mailto:", "tel:")) else urllib.parse.urljoin(base, href)
             text = " ".join(" ".join(link["text"]).split()) or link["aria"]
-            self.links.append({"url": absolute.split("#")[0] if not absolute.startswith(("mailto:", "tel:")) else absolute, "text": text})
-        self.times = [{"datetime": t["datetime"], "text": " ".join(" ".join(t["text"]).split())} for t in parser.times]
+            self.links.append({"url": absolute.split("#")[0] if not absolute.startswith(("mailto:", "tel:")) else absolute, "text": text,
+                               "zone": link["zone"]})
+        self.times = [{"datetime": t["datetime"], "text": " ".join(" ".join(t["text"]).split()), "kind": t["kind"]} for t in parser.times]
         self.feeds = [urllib.parse.urljoin(base, f) for f in parser.feeds]
+        self.hreflangs = sorted(set(parser.hreflangs))
         self.jsonld = []
         for raw_ld in parser.jsonld_raw:
             try:

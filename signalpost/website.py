@@ -6,13 +6,14 @@ registry-declared site/e-mail domain combined with the legal name). Name similar
 """
 from __future__ import annotations
 
+import difflib
 import re
 import time
 import urllib.parse
 from datetime import datetime
 
 from .evidence import Ledger
-from .names import (FREE_MAIL, core_name, tokens, domain_slugs, distinctive, domain_candidates, full_name_in_text, name_in_text, orgnr_regex, orgnrs_in,
+from .names import (FREE_MAIL, GENERIC, core_name, strip_accents_no, tokens, domain_slugs, distinctive, domain_candidates, full_name_in_text, name_in_text, orgnr_regex, orgnrs_in,
                     phone_digits, phones_in, registered_domain)
 from .net import Fetcher, Snapshot, resolve
 from .page import Page, snippet
@@ -29,7 +30,7 @@ SECTION_KEYWORDS = {
     "contact": ["kontakt", "contact", "finn-oss", "find-us", "kontakt-oss", "contact-us"],
     "about": ["om-oss", "about", "hvem-er-vi", "om-selskapet", "selskapet", "historie", "company", "who-we-are", "om_oss", "/om"],
     "people": ["ansatte", "medarbeidere", "ledelse", "team", "people", "folk", "styret", "management", "vare-folk", "våre-ansatte", "kontaktpersoner"],
-    "careers": ["karriere", "jobb", "ledige-stillinger", "stilling", "career", "jobs", "bli-med", "work-with-us", "join-us", "rekruttering"],
+    "careers": ["karriere", "jobb", "ledige-stillinger", "ledig-stilling", "ledige", "stilling", "career", "jobs", "bli-med", "work-with-us", "join-us", "rekruttering"],
     "news": ["nyheter", "news", "aktuelt", "blogg", "blog", "presse", "press", "artikler", "media", "nytt"],
     "locations": ["avdeling", "kontorer", "lokasjoner", "locations", "butikker", "stores", "våre-kontorer", "finn-butikk", "offices"],
     "privacy": ["personvern", "privacy", "cookies", "vilkar", "vilkår", "terms"],
@@ -180,16 +181,16 @@ def _parked(visit: SiteVisit) -> bool:
 ENTITY_NAME_RE = re.compile(r"([A-ZÆØÅ0-9][\w&.'\- ]{1,50}?)\s(AS|ASA|A/S|SA|DA|ANS|NUF)\b")
 
 
-def other_entities(ctx: dict, page: Page) -> list[str]:
+def other_entities(ctx: dict, page: Page, zones: list[str] | None = None) -> list[str]:
     """Legal-entity names the page uses to identify its owner (title, site name, footer) that are not ours."""
     ours = [core_name(n).lower() for n in [ctx.get("legal_name") or ""] + (ctx.get("former_names") or []) if n]
     ours += [core_name(s.get("name") or "").lower() for s in ctx.get("subunits") or [] if s.get("name")]
-    zones = [page.title, page.meta.get("og:site_name", ""), page.flat[-1500:]]
+    zones = zones if zones is not None else [page.title, page.meta.get("og:site_name", ""), page.flat[-1500:]]
     found = []
     for zone in zones:
         for m in ENTITY_NAME_RE.finditer(zone or ""):
             name = m.group(1).strip(" .,-|©")
-            name = re.sub(r"^(?:©|copyright|\(c\))\s*(?:\d{4}(?:\s*[-–]\s*\d{4})?)?\s*", "", name, flags=re.I).strip()
+            name = re.sub(r"^(?:(?:©|copyright|\(c\))\s*)?(?:\d{4}(?:\s*[-–]\s*\d{4})?)?\s*", "", name, flags=re.I).strip()
             words = name.split()
             if not words or len(name) < 3:
                 continue
@@ -377,6 +378,9 @@ def _name_span(legal: str, text: str) -> str:
     return snippet(text, i, i + len(core)) if i >= 0 else core
 
 
+NEWS_SEGMENTS = {"nyheter", "news", "aktuelt", "blogg", "blog", "artikler", "presse", "nytt", "article", "articles", "artikkel"}
+
+
 def _links_for(page: Page, site_domain: str, section: str) -> list[str]:
     out = []
     keys = SECTION_KEYWORDS[section]
@@ -389,6 +393,16 @@ def _links_for(page: Page, site_domain: str, section: str) -> list[str]:
             continue
         path = urllib.parse.urlsplit(url).path.lower()
         text = (link["text"] or "").lower()
+        if section == "careers":
+            # a careers page is a path segment that starts with the keyword ("/karriere", "/ledige-stillinger"), not an
+            # article slug that merely contains it ("…-ny-toppjobb", "/bestilling")
+            segments = [x for x in path.split("/") if x]
+            if NEWS_SEGMENTS & set(segments) or not (any(seg.startswith(k.strip("/")) for seg in segments for k in keys) or
+                                                      any(text.startswith(k.replace("-", " ")) for k in keys if len(k) > 3)):
+                continue
+            if url not in out and not re.search(r"\.(pdf|jpg|png|zip|docx?)$", path):
+                out.append(url)
+            continue
         if any(k in path for k in keys) or any(k.strip("/").replace("-", " ") == text.strip() for k in keys) or \
                 any(text.startswith(k.strip("/").replace("-", " ")) for k in keys if len(k) > 3):
             if url not in out and not re.search(r"\.(pdf|jpg|png|zip|docx?)$", path):
@@ -495,10 +509,16 @@ def discover_and_verify(ctx: dict, fetcher: Fetcher, ledger: Ledger, deadline: f
             support.append(ledger.add_evidence(wd["snapshot"], source_class="open_knowledge_base_cc0", method="sparql",
                                                source_url=wd["item"], span=f"{wd['item']} P2333 = {ctx['organisation_number']}; P856 = {cand['url']}"))
         confidence = 0.99 if proof["level"] in ("organisation_number_on_page", "registry_phone_on_page", "registry_email_on_page") else 0.95
-        ledger.claim("web_presence", "official_website", home, support, confidence=confidence, key="official_website",
-                     note=f"discovered via {cand['origin']}; identity proof: {proof['level']}")
+        scope = site_scope(ctx, visit) if ctx.get("website_relation") != "page_on_chain_site" else None
+        note = f"discovered via {cand['origin']}; identity proof: {proof['level']}"
+        if scope:
+            ctx["website_relation"] = "group_site"
+            ctx["group_site"] = scope
+            note += f"; site belongs to a group, parent or sister company ({scope['reason']}: {scope['owner']}), so its social profiles, news and jobs are not attributed to this entity"
+        ledger.claim("web_presence", "official_website", home, support, confidence=confidence, key="official_website", note=note,
+                     relation="group_site" if scope else "exact_entity")
         return {"home": home, "domain": registered_domain(parts.hostname or ""), "visits": pages_checked, "origin": cand["origin"],
-                "proof": proof["level"], "crawl": ctx.get("website_relation") != "page_on_chain_site"}
+                "proof": proof["level"], "crawl": ctx.get("website_relation") != "page_on_chain_site", "group": scope}
     checked = [c["url"] for c in ctx["website_candidates"]]
     if _publish_registry_declared(ctx, ledger):
         return None
@@ -510,6 +530,61 @@ def discover_and_verify(ctx: dict, fetcher: Fetcher, ledger: Ledger, deadline: f
         ledger.mark("official_website", "not_available", "registry-listed website is parked, unreachable or unrelated to this entity", checked=checked)
     else:
         ledger.mark("official_website", "not_available", "no verifiable company-owned website found", checked=checked)
+    return None
+
+
+COUNTRY_WORDS = {"norge", "norway", "noreg", "norden", "nordic", "nordics", "nordisk", "scandinavia", "skandinavia", "international",
+                 "sverige", "sweden", "danmark", "denmark", "finland", "europe", "europa", "global"}
+UNIT_WORDS = {"supply", "chain", "logistikk", "logistics", "distribusjon", "distribution", "eiendom", "eiendommer", "property", "properties",
+              "drift", "operations", "produksjon", "production", "retail", "butikker", "salg", "sales", "finans", "finance", "innkjøp",
+              "procurement", "services", "service", "it"}
+PARENT_WORDS = {"group", "gruppen", "gruppe", "holding", "konsern", "capital", "industrier", "industries"}
+GROUP_SCOPED = ("social_profile", "company_news", "job_posting")
+
+
+def _owner_lines(page: Page) -> tuple[list[str], list[str]]:
+    """Where a site names its owner: title, site name, JSON-LD organisation names and copyright lines."""
+    ld = [str(item.get(k)) for item in page.jsonld for k in ("name", "legalName") if item.get(k)
+          and str(item.get("@type", "")).lower() in ("organization", "localbusiness", "corporation", "website")]
+    return [page.title, page.meta.get("og:site_name", "")] + ld, [m.group(0) for m in COPYRIGHT_RE.finditer(page.flat)][:3]
+
+
+def site_scope(ctx: dict, home: SiteVisit) -> dict | None:
+    """Detect a verified site that belongs to the company's group, parent or sister company rather than to the company itself.
+
+    The site may still carry our organisation number (a group site listing its subsidiaries in the footer), so the
+    identity proof holds, but its social profiles, news and jobs are the group's. Returns {reason, owner} or None.
+    """
+    page = home.page
+    org = ctx["organisation_number"]
+    names, copyright = _owner_lines(page)
+    lines = names + copyright
+    zone = " | ".join(x for x in lines if x)
+    ours = [n for n in [ctx.get("legal_name") or ""] + (ctx.get("former_names") or []) if n]
+    own_named = any(name_in_text(n, zone) for n in ours)
+    owner_orgnrs = orgnrs_in(" ".join(copyright)) | {re.sub(r"\D", "", str(item.get(k)))[-9:] for item in page.jsonld
+                                                     for k in ("taxID", "vatID", "identifier") if isinstance(item.get(k), (str, int))}
+    owner_orgnrs = {o for o in owner_orgnrs if len(o) == 9 and o != org} - {s.get("organisation_number") for s in ctx.get("subunits") or []}
+    copyright_orgnr = org in orgnrs_in(" ".join(copyright))
+    if owner_orgnrs and not copyright_orgnr:
+        holder = next(iter(other_entities(ctx, page, zones=copyright)), "")
+        return {"reason": "owner_line_names_other_organisation_number", "owner": (holder + ", " if holder else "") + "org.nr. " + sorted(owner_orgnrs)[0]}
+    if own_named or copyright_orgnr:
+        return None
+    others = [x for x in other_entities(ctx, page, zones=lines) if x]
+    if others:
+        return {"reason": "owner_line_names_other_entity", "owner": others[0]}
+    core = tokens(core_name(ctx.get("legal_name") or ""))
+    host = urllib.parse.urlsplit(home.snap.final_url or "").hostname or ""
+    label = re.sub(r"[^a-z0-9æøå]", "", registered_domain(host).split(".")[0])
+    brands = [label] + [re.sub(r"[^a-z0-9æøå]", "", x.lower()) for x in names[1:] if x and len(x) < 40]
+    for i in range(1, len(core)):
+        prefix, rest = "".join(core[:i]), set(core[i:])
+        if len(prefix) >= 3 and prefix in brands and rest & (COUNTRY_WORDS | UNIT_WORDS) and not rest & PARENT_WORDS:
+            return {"reason": "site_of_parent_brand", "owner": prefix}
+    langs = {h.split("-")[0] for h in page.hreflangs if h != "x-default"}
+    if not registered_domain(host).endswith(".no") and len(langs) >= 4:
+        return {"reason": "international_group_site", "owner": registered_domain(host)}
     return None
 
 
@@ -567,7 +642,13 @@ def crawl_site(ctx: dict, site: dict, fetcher: Fetcher, ledger: Ledger, deadline
     home_page = visits[0].page
     domain = site["domain"]
     wanted: list[tuple[str, str]] = []
-    for section in ("contact", "about", "people", "careers", "news", "locations"):
+    group = site.get("group")
+    if group:
+        reason = (f"the verified website belongs to a group, parent or sister company ({group['owner']}); "
+                  "its social profiles, news and jobs are not attributed to this entity")
+        for family in GROUP_SCOPED:
+            ledger.mark(family, "not_available", reason, checked=[site["home"]])
+    for section in ("contact", "about", "people") + (() if group else ("careers", "news")) + ("locations",):
         for url in _links_for(home_page, domain, section)[:2 if section in ("people", "news", "careers") else 1]:
             wanted.append((section, url))
     sections: dict[str, list[SiteVisit]] = {"home": [visits[0]]}
@@ -584,14 +665,15 @@ def crawl_site(ctx: dict, site: dict, fetcher: Fetcher, ledger: Ledger, deadline
         sections.setdefault(section, []).append(v)
     # Feeds and article dates for news
     feed_urls = []
-    for v in visits:
+    for v in ([] if group else visits):
         feed_urls += [f for f in v.page.feeds if registered_domain(urllib.parse.urlsplit(f).hostname or "") == domain]
     news_items = []
+    feed_urls = [f for f in feed_urls if not re.search(r"(comments|product|produkt|shop|/wp-json/)", f, re.I)]
     if feed_urls and time.monotonic() < deadline:
         snap = fetcher.get(feed_urls[0], accept="application/rss+xml,application/atom+xml,application/xml,text/xml")
         if snap.ok:
             news_items += _parse_feed(snap, domain)
-    if len(news_items) < 3:
+    if len(news_items) < 3 and not group:
         for v in sections.get("news", []):
             news_items += _news_links(v, domain, section_page=True)
         news_items += _news_links(visits[0], domain)
@@ -604,54 +686,31 @@ def crawl_site(ctx: dict, site: dict, fetcher: Fetcher, ledger: Ledger, deadline
             if v is None:
                 continue
             visits.append(v)
-            date, span = _article_date(v.page)
+            if v.page.meta.get("og:type", "").lower() == "product" or v.page.ld_of_type("Product"):
+                continue
+            og_title = v.page.meta.get("og:title") or ""
+            date, span = _article_date(v.page, (og_title, item.get("title") or ""))
             if date:
                 item["date"], item["span"], item["visit"] = date, span, v
-                if not item.get("title") or len(item["title"]) < 8:
-                    item["title"] = v.page.meta.get("og:title") or v.page.title
+                card = item.get("title") or ""
+                heading = next((h for h in v.page.headings if len(h) >= 8 and card.lower().startswith(h.lower())), "")
+                if len(og_title) >= 8 or heading or len(card) < 8:
+                    item["title"] = strip_site_suffix(og_title if len(og_title) >= 8 else heading or card or v.page.title, domain,
+                                                      v.page.meta.get("og:site_name", ""))
     site["all_visits"] = visits
     _extract(ctx, site, visits, sections, ledger)
-    _publish_news(_dedupe_news(news_items), ledger)
+    if not group:
+        _publish_news(ctx, _dedupe_news(news_items), ledger, domain, menu=_menu_urls(visits[0].page))
     return site
 
 
 def _extract(ctx: dict, site: dict, visits: list[SiteVisit], sections: dict, ledger: Ledger) -> None:
     domain = site["domain"]
     home = visits[0]
-    # Social profiles linked from the verified site
-    socials: dict[tuple, tuple] = {}
-    for v in visits:
-        for link in v.page.links:
-            url = link["url"]
-            if not url.startswith("http") or not any(h in url.lower() for h in SOCIAL_HOSTS):
-                continue
-            for platform, pattern in SOCIAL_PATTERNS:
-                m = pattern.match(url)
-                if not m:
-                    continue
-                handle = next((g for g in m.groups()[::-1] if g), "")
-                if "." in handle.split("/")[-1] and handle.lower().endswith((".php", ".html", ".htm", ".aspx")):
-                    break
-                if handle.lower().strip("@") in PLATFORM_OWN_PAGES or handle.lower() in ("company", "channel", "user", "c"):
-                    break
-                key = (platform, handle.lower())
-                if key not in socials:
-                    socials[key] = (url.split("?")[0], v, link["text"])
-                break
-    by_platform: dict[str, list] = {}
-    for (platform, handle), item in socials.items():
-        by_platform.setdefault(platform, []).append(item)
-    for platform, items in by_platform.items():
-        # Many links to one platform usually means a news/aggregator page, not company-owned profiles.
-        if len(items) > 3:
-            continue
-        for url, v, text in items:
-            ev = ledger.add_evidence(v.snap, source_class="company_owned_website", method="html_anchor",
-                                     span=f'<a href="{url}">{text or platform}</a> on verified site')
-            ledger.claim("web_presence", "social_profile", {"platform": platform, "url": url}, [ev], key=("social", url.lower().rstrip("/")),
-                         confidence=0.95, relation="linked_from_verified_site")
-    if not socials:
-        ledger.mark("social_profile", "not_available", "verified site links no social profiles", checked=[site["home"]])
+    org_ld = [x for v in visits[:3] for x in v.page.ld_of_type(*ORG_TYPES)]
+    brand = _brand(ctx, site, home, org_ld)
+    if not site.get("group"):
+        _extract_socials(ctx, site, visits, org_ld, brand, ledger)
 
     # Contact e-mail and phone on the verified site
     emails: dict[str, tuple] = {}
@@ -709,10 +768,6 @@ def _extract(ctx: dict, site: dict, visits: list[SiteVisit], sections: dict, led
         ledger.claim("leadership_locations", "website_location", value, [ev], key=("site_address", value.lower()), confidence=0.9)
 
     # Public brand and self-description
-    org_ld = [x for v in visits[:3] for x in v.page.ld_of_type("Organization", "LocalBusiness", "Corporation", "Store", "Restaurant",
-                                                                 "ProfessionalService", "HomeAndConstructionBusiness", "AutoDealer",
-                                                                 "MedicalBusiness", "LegalService", "FinancialService")]
-    brand = _brand(ctx, site, home, org_ld)
     if brand:
         ev = ledger.add_evidence(home.snap, source_class="company_owned_website", method="og:site_name/title/json-ld",
                                  span=f"brand marker: {brand}")
@@ -783,6 +838,8 @@ def _extract(ctx: dict, site: dict, visits: list[SiteVisit], sections: dict, led
             count += 1
 
     # Jobs linked from the site (company careers pages and applicant-tracking systems)
+    if site.get("group"):
+        return
     jobs = 0
     career_visits = sections.get("careers", [])
     for v in visits:
@@ -828,6 +885,143 @@ def _extract(ctx: dict, site: dict, visits: list[SiteVisit], sections: dict, led
         ledger.mark("job_posting", "not_available", "no careers page or job links on verified site", checked=[site["home"]])
 
 
+ORG_TYPES = ("Organization", "LocalBusiness", "Corporation", "Store", "Restaurant", "ProfessionalService", "HomeAndConstructionBusiness",
+             "AutoDealer", "MedicalBusiness", "LegalService", "FinancialService")
+SOCIAL_GENERIC = GENERIC | {"senter", "sentrum", "center", "centre", "transport", "bygg", "byggservice", "regnskap", "solutions", "systems",
+                            "teknikk", "maskin", "handel", "partner", "partners", "studio", "design", "media", "norsk", "nordic", "oslo",
+                            "bergen", "trondheim", "stavanger", "tromsø", "eiendomsmegling", "entreprenør", "entreprenor", "elektro",
+                            "rørlegger", "rorlegger", "klinikk", "stiftelsen", "foreningen", "forening", "selskap", "selskapet", "senteret"}
+THEME_HANDLES = {"wix", "wixcom", "squarespace", "wordpress", "wordpressdotcom", "elementor", "themeforest", "envato", "shopify", "webflow",
+                 "godaddy", "hubspot", "mailchimp", "weebly", "jimdo", "yoast", "woocommerce", "joomla", "drupal", "themeisle", "astra",
+                 "generatepress", "divi", "elegantthemes", "mystore", "mystorebuilder", "domeneshop", "one.com", "onecom", "proisp",
+                 "webnode", "simvoly", "framer", "cargo", "carrd", "strikingly", "zyro", "hostinger", "facebook", "instagram"}
+OPAQUE_HANDLE = re.compile(r"^(?:\d{5,}|UC[\w-]{20,}|profile\.php)$", re.I)
+_SQUASH = re.compile(r"[^a-z0-9æøå]")
+
+
+def _name_keys(ctx: dict, site: dict, brand: str | None) -> dict:
+    names = [n for n in [ctx.get("legal_name") or ""] + (ctx.get("former_names") or []) if n]
+    slugs = {_SQUASH.sub("", x) for n in names for trim in (False, True) for x in domain_slugs(n, trim_generic=trim)}
+    core_tokens = [t for n in names for t in tokens(core_name(n))]
+    single = len(set(core_tokens)) == 1
+    distinct = {t for t in core_tokens if t not in SOCIAL_GENERIC and (len(t) >= 6 or single and len(t) >= 4)}
+    initials = ["".join(t[0] for t in tokens(core_name(n)) if t not in ("og", "and", "i")) for n in names]
+    label = _SQUASH.sub("", site["domain"].split(".")[0])
+    return {"slugs": {x for x in slugs if len(x) >= 4}, "short": {x for x in slugs | {label} if 2 <= len(x) < 4},
+            "label": label, "brand": _SQUASH.sub("", (brand or "").lower()), "tokens": distinct,
+            "initials": {i for i in initials if len(i) >= 3}, "names": names + ([brand] if brand else [])}
+
+
+def social_owner(keys: dict, handle: str, link_text: str = "") -> str | None:
+    """Why a social handle belongs to the company (matches its name, brand or domain), or None when it does not."""
+    h = _SQUASH.sub("", handle.lower().lstrip("@"))
+    if not h or h in THEME_HANDLES:
+        return None
+    if OPAQUE_HANDLE.match(handle.split("/")[-1]) or re.fullmatch(r"[\w-]*?\d{8,}", handle) and not any(s in h for s in keys["slugs"]):
+        return "opaque_id_named_in_link" if link_text and any(name_in_text(n, link_text) for n in keys["names"]) else None
+    full = keys["slugs"] | ({keys["label"]} if len(keys["label"]) >= 4 else set()) | ({keys["brand"]} if len(keys["brand"]) >= 4 else set())
+    if any(x in h for x in full):
+        return "name_brand_or_domain_in_handle"
+    if any(h.startswith(x) or len(x) == 3 and h.endswith(x) for x in keys["short"]):
+        return "short_name_or_domain_in_handle"
+    if any(t in h for t in keys["tokens"]):
+        return "distinctive_name_token_in_handle"
+    if any(h.startswith(i) and len(h) <= len(i) + 6 for i in keys["initials"]):
+        return "name_initials_handle"
+    if len(h) >= 6 and any(len(x) >= 6 and difflib.SequenceMatcher(None, h, x).ratio() >= 0.88 for x in full):
+        return "spelling_variant_of_name"
+    return None
+
+
+def _parse_social(url: str) -> tuple[str, str] | None:
+    for platform, pattern in SOCIAL_PATTERNS:
+        m = pattern.match(url)
+        if not m:
+            continue
+        handle = next((g for g in m.groups()[::-1] if g), "")
+        if "." in handle.split("/")[-1] and handle.lower().endswith((".php", ".html", ".htm", ".aspx")) and handle != "profile.php":
+            return None
+        if handle.lower().strip("@") in PLATFORM_OWN_PAGES or handle.lower() in ("company", "channel", "user", "c"):
+            return None
+        return platform, handle
+    return None
+
+
+def _url_key(url: str) -> str:
+    return re.sub(r"^https?://(www\.|m\.|[a-z]{2}-[a-z]{2}\.)?", "", url.lower()).rstrip("/")
+
+
+def _ld_is_ours(item: dict, keys: dict, domain: str) -> bool:
+    url = item.get("url") if isinstance(item.get("url"), str) else ""
+    if url and registered_domain(urllib.parse.urlsplit(url).hostname or "") == domain:
+        return True
+    name = " ".join(str(item.get(k) or "") for k in ("name", "legalName"))
+    return any(name_in_text(n, name) for n in keys["names"])
+
+
+def _extract_socials(ctx: dict, site: dict, visits: list[SiteVisit], org_ld: list[dict], brand: str | None, ledger: Ledger) -> None:
+    """Social profiles that belong to the company: JSON-LD sameAs of its own organisation, or links whose handle matches its
+    name, brand or domain. Footer links to a group, agency, theme vendor, client or employee are excluded."""
+    keys = _name_keys(ctx, site, brand)
+    found: dict[tuple, dict] = {}
+    excluded: list[dict] = []
+    for v in visits:
+        for link in v.page.links:
+            url = link["url"]
+            if not url.startswith("http") or not any(h in url.lower() for h in SOCIAL_HOSTS):
+                continue
+            parsed = _parse_social(url)
+            if not parsed or (parsed[0], parsed[1].lower()) in found:
+                continue
+            why = social_owner(keys, parsed[1], link["text"])
+            if why is None:
+                if len(excluded) < 12 and all(e["url"] != url.split("?")[0] for e in excluded):
+                    excluded.append({"url": url.split("?")[0], "page": v.snap.final_url, "zone": link.get("zone"),
+                                     "reason": "handle does not match the company's name, brand or domain"})
+                continue
+            found[(parsed[0], parsed[1].lower())] = {"url": url.split("?")[0], "visit": v, "text": link["text"], "how": why,
+                                                    "platform": parsed[0]}
+    for v in visits[:3]:
+        for item in v.page.ld_of_type(*ORG_TYPES):
+            if not _ld_is_ours(item, keys, site["domain"]):
+                continue
+            same = item.get("sameAs")
+            for url in (same if isinstance(same, list) else [same]):
+                url = url.strip().split("?")[0] if isinstance(url, str) else ""
+                parsed = _parse_social(url) if url.startswith("http") else None
+                if not parsed or any(_url_key(f["url"]) == _url_key(url) for f in found.values()):
+                    continue
+                found.setdefault((parsed[0], parsed[1].lower()), {"url": url, "visit": v, "text": "", "how": "json_ld_sameas",
+                                                                  "platform": parsed[0]})
+    accepted = {_url_key(f["url"]) for f in found.values()} | {(f["platform"], k[1]) for k, f in found.items()}
+    excluded = [e for e in excluded if _url_key(e["url"]) not in accepted and
+                ((_parse_social(e["url"]) or ("", ""))[0], (_parse_social(e["url"]) or ("", ""))[1].lower()) not in accepted]
+    by_platform: dict[str, list] = {}
+    for item in found.values():
+        by_platform.setdefault(item["platform"], []).append(item)
+    published = 0
+    for platform, items in by_platform.items():
+        # Many links to one platform usually means a news/aggregator page, not company-owned profiles.
+        if len(items) > 3:
+            continue
+        for item in items:
+            url, v = item["url"], item["visit"]
+            if item["how"] == "json_ld_sameas":
+                span, method = f"JSON-LD Organization sameAs {url}", "json_ld:sameAs"
+            else:
+                span, method = f'<a href="{url}">{item["text"] or platform}</a> on verified site; ownership: {item["how"]}', "html_anchor"
+            ev = ledger.add_evidence(v.snap, source_class="company_owned_website", method=method, span=span)
+            ledger.claim("web_presence", "social_profile", {"platform": platform, "url": url}, [ev], key=("social", url.lower().rstrip("/")),
+                         confidence=0.95, relation="linked_from_verified_site", note=f"ownership: {item['how']}")
+            published += 1
+    if excluded:
+        ctx["social_excluded"] = excluded
+    if not published:
+        reason = "verified site links no social profiles" if not excluded else \
+            "social links on the verified site do not match the company's name, brand or domain (group, agency, theme or third-party accounts)"
+        ledger.mark("social_profile", "not_available", reason, checked=[site["home"]])
+
+
 def _brand(ctx: dict, site: dict, home: SiteVisit, org_ld: list[dict]) -> str | None:
     legal_tokens = {t for t in tokens(core_name(ctx.get("legal_name") or "")) if len(t) >= 3}
     dom_label = site["domain"].split(".")[0].replace("-", "")
@@ -839,6 +1033,8 @@ def _brand(ctx: dict, site: dict, home: SiteVisit, org_ld: list[dict]) -> str | 
         cand = re.split(r"\s[|•·–—]\s", cand)[0].strip()
         if not (2 < len(cand) < 60) or re.search(r"^(hjem|home|forside|velkommen|welcome|start)$", cand, re.I):
             continue
+        if core_name(cand) != cand and core_name(cand).lower() != core_name(ctx.get("legal_name") or "").lower():
+            continue  # another registered entity's name (a sister or parent company), not our brand
         ctoks = set(tokens(cand))
         squashed = re.sub(r"[^a-z0-9æøå]", "", cand.lower())
         if ctoks & legal_tokens or (len(dom_label) >= 4 and (dom_label in squashed or squashed in dom_label)):
@@ -863,14 +1059,14 @@ def _parse_feed(snap: Snapshot, domain: str) -> list[dict]:
         link = ""
         if link_node is not None:
             link = (link_node.text or link_node.attrib.get("href") or "").strip()
-        date_raw = None
-        for key in ("pubDate", "published", "updated", "date"):
+        date_raw, date_key = None, None
+        for key in ("pubDate", "published", "date"):  # publication dates only; Atom <updated> is a modification time
             if fields.get(key) is not None and fields[key].text:
-                date_raw = fields[key].text.strip()
+                date_raw, date_key = fields[key].text.strip(), key
                 break
         date = _parse_any_date(date_raw)
         if title and link and date:
-            items.append({"title": title[:200], "url": link, "date": date, "span": f"<item><title>{title[:120]}</title><pubDate>{date_raw}</pubDate>",
+            items.append({"title": title[:200], "url": link, "date": date, "span": f"<item><title>{title[:120]}</title><{date_key}>{date_raw}</{date_key}>",
                           "snap": snap, "method": "rss_item"})
         if len(items) >= 15:
             break
@@ -924,7 +1120,7 @@ def _news_links(v: SiteVisit, domain: str, section_page: bool = False) -> list[d
         if not (is_news_path or deeper) or len(text) < 15 or len(text) > 220 or DEFAULT_POSTS.match(text.strip()):
             continue
         clean = re.sub(r"^\s*(\d{1,2}\.?\s+\w+\.?\s+20\d{2}|\d{1,2}\.\d{1,2}\.20\d{2}|20\d{2}-\d{2}-\d{2})(\s*\|\s*\d{1,2}[:.]\d{2}(\s*\([A-Z]{3,4}\))?)?\s*[-–|:]?\s*", "", text)
-        item = {"title": (clean or text)[:200], "url": url.split("#")[0], "snap": v.snap, "method": "news_index_link"}
+        item = {"title": clean_news_title(clean or text, url), "url": url.split("#")[0], "snap": v.snap, "method": "news_index_link"}
         dm = TEXT_DATE.search(text[:40]) or NUM_DATE.search(text[:40])
         if dm and _parse_any_date(dm.group(0)):
             item["date"] = _parse_any_date(dm.group(0))
@@ -939,8 +1135,15 @@ def _news_links(v: SiteVisit, domain: str, section_page: bool = False) -> list[d
     return out[:12]
 
 
-def _article_date(page: Page) -> tuple[str | None, str | None]:
-    for key in ("article:published_time", "og:published_time", "datepublished", "date", "pubdate", "publish-date", "dc.date"):
+PUBLISHED_META = ("article:published_time", "og:published_time", "datepublished", "pubdate", "publishdate", "publish-date", "publish_date",
+                  "dc.date.issued", "dcterms.issued", "sailthru.date", "parsely-pub-date")
+
+
+def _article_date(page: Page, titles: tuple[str, ...] = ()) -> tuple[str | None, str | None]:
+    """Publication date of an article page. Explicit publication markers count, and a date printed in the article
+    header (right after the post title, or labelled "Publisert"). Modification dates (article:modified_time,
+    dateModified, <time class="updated">, "Oppdatert …") and dates further down in running text do not."""
+    for key in PUBLISHED_META:
         if page.meta.get(key):
             d = _parse_any_date(page.meta[key])
             if d:
@@ -950,17 +1153,111 @@ def _article_date(page: Page) -> tuple[str | None, str | None]:
             d = _parse_any_date(str(item["datePublished"]))
             if d:
                 return d, f"JSON-LD datePublished = {item['datePublished']}"
-    for t in page.times[:3]:
+    for t in page.times[:6]:
+        kind = t.get("kind", "")
+        if re.search(r"(updated|modified|oppdatert)", kind) or not re.search(r"(published|publish|pubdate|entry-date|post-date|posted|date-?published|publisert)", kind):
+            continue
         d = _parse_any_date(t["datetime"] or t["text"])
         if d:
-            return d, f'<time datetime="{t["datetime"]}">{t["text"][:60]}</time>'
-    head = page.flat[:1500]
-    m = TEXT_DATE.search(head) or NUM_DATE.search(head)
-    if m:
-        d = _parse_any_date(m.group(0))
-        if d:
-            return d, snippet(head, m.start(), m.end(), 50)
+            return d, f'<time datetime="{t["datetime"]}" class/itemprop="{kind.strip()[:60]}">{t["text"][:60]}</time>'
+    head = page.flat[:3000]
+    zones = [m.end() for m in re.finditer(r"\b(publisert|published|posted|postet|skrevet)\b[:\s]*", head, re.I)]
+    for title in titles:
+        key = " ".join((title or "").split())[:40]
+        if len(key) >= 12 and head.find(key) >= 0:
+            zones.append(head.find(key) + len(key))
+    for start in zones:
+        window = head[start:start + 260]
+        m = TEXT_DATE.search(window) or NUM_DATE.search(window)
+        if m and not re.search(r"(oppdatert|updated|endret|modified|sist)", window[:m.start()][-30:], re.I):
+            d = _parse_any_date(m.group(0))
+            if d:
+                return d, snippet(head, start + m.start(), start + m.end(), 50)
     return None, None
+
+
+NOT_ARTICLE_PATH = re.compile(r"/(produkt|produkter|product|products|shop|butikk|nettbutikk|vare|varer|collections?|kategori|category|categories|"
+                              r"tag|tags|emne|author|forfatter|page/\d+|side/\d+|sok|search|kurv|cart|checkout|kasse|min-side|login|logg-inn)(/|$)", re.I)
+NEWSROOM_HOSTS = ("mynewsdesk.com", "cision.com", "newsweb.oslobors.no", "kommunikasjon.ntb.no", "ntbinfo.no", "globenewswire.com",
+                  "prnewswire.com", "via.ritzau.dk", "newsroom.notified.com")
+LOREM = {"lorem", "ipsum", "dolor", "amet", "consectetur", "adipiscing", "elit", "praesent", "donec", "nullam", "aliquam", "mauris", "urna",
+         "turpis", "vitae", "nibh", "odio", "taciti", "sociosqu", "litora", "aptent", "etiam", "vestibulum", "curabitur", "pellentesque",
+         "quis", "nisi", "tellus", "duis", "enim", "fusce", "integer", "morbi", "phasellus", "suspendisse", "vivamus", "maecenas", "odiosters",
+         "enims", "sadips", "nunc", "cras", "proin", "quisque", "sed", "eget", "felis", "nulla", "tempor", "incididunt", "labore", "magna",
+         "nec", "quam", "sodales", "sollicitudin", "sollicit", "sollicits", "ante", "ligula", "lacus", "risus", "augue", "eros", "justo",
+         "massa", "metus", "neque", "purus", "sapien", "velit", "arcu", "libero", "lectus", "dictum", "eleifend", "erat", "euismod",
+         "facilisis", "fermentum", "posuere", "rhoncus", "rutrum", "sagittis", "semper", "tincidunt", "tortor", "tristique", "ultrices",
+         "varius", "viverra", "volutpat", "consequat", "commodo", "ullamcorper", "pharetra", "placerat", "egestas", "blandit"}
+DEMO_TITLE = re.compile(r"^(hello world!?|hei verden!?|sample page|eksempelside|uncategorized|ukategorisert|sample post\b.*|.*\bpost example|"
+                        r"(gallery|video|audio|image|quote|link|aside|standard|sticky|status|chat) post\b.*|(blog )?post title( here)?|"
+                        r"overskrift( her)?|tittel( her)?|ny+t+ innleg+|test(innlegg| post| artikkel| nyhet)?\s*\d*|testing|"
+                        r"lorem ipsum.*|this is (a|an|the) (sample|test|demo).*|demo( post)?\s*\d*|eksempel(innlegg|artikkel)?\s*\d*)$", re.I)
+EDITORIAL_NACE = ("58.12", "58.13", "58.14", "60.", "63.91")  # newspapers, periodicals, broadcasting, news agencies (SN2007 and SN2025)
+
+
+def clean_news_title(title: str, url: str) -> str:
+    """A post title from link or card text: drop image-credit prefixes and the date/teaser text that cards append."""
+    t = " ".join((title or "").split())
+    t = re.sub(r"^(illus(trasjon)?|foto|bilde|image|photo|ill\.?)\s*[:.|–-]\s*", "", t, flags=re.I)
+    if re.match(r"^(foto|bilde|image|photo|portrett|illustrasjon) (av|of)\b", t, re.I):
+        slug = urllib.parse.unquote(urllib.parse.urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1])
+        t = re.sub(r"[-_]+", " ", re.sub(r"\.\w{2,4}$", "", slug)).strip().capitalize() or t
+    m = re.search(r"\s(\d{1,2}\.?\s+[A-Za-zæøåÆØÅ]{3,9}\.?\s+20\d{2}|\d{1,2}\.\d{1,2}\.20\d{2}|20\d{2}-\d{2}-\d{2})\b", t)
+    if m and m.start() >= 12:
+        t = t[:m.start()]
+    t = re.sub(r"(\s*(\.{3}|…)?\s*(les mer|read more|les hele saken)|\s+(→|»))\s*$", "", t, flags=re.I)
+    return t.strip(" -–|:")[:200]
+
+
+SPAM_TITLE = re.compile(r"\b(casino|kasino|betting|bookmaker|slot machines?|apk|viagra|cialis|porn\w*|escort service|payday loans?|"
+                        r"pinco|melbet|mostbet|1win|1xbet|bonus code|giriş|kayıt|türkiye|kazino|kasyno|казино|ставки)\b|[\u0400-\u04ff]{4,}", re.I)
+
+
+def junk_news_title(title: str) -> bool:
+    t = " ".join((title or "").split()).strip(" .!")
+    words = re.findall(r"[a-zæøå]+", t.lower())
+    return not t or bool(DEMO_TITLE.match(t)) or bool(DEMO_TITLE.match(re.sub(r"[^\w\s#]", "", t))) or bool(SPAM_TITLE.search(t)) or (len(words) >= 2 and sum(w in LOREM for w in words) >= 2)
+
+
+def strip_site_suffix(title: str, domain: str, site_name: str = "") -> str:
+    """'Post title - Sirius Økonomi' -> 'Post title' when the last segment is the site's name or domain."""
+    parts = re.split(r"\s+[|–—-]\s+", title or "")
+    label = re.sub(r"[^a-z0-9æøå]", "", domain.split(".")[0])
+    if len(parts) > 1:
+        last = re.sub(r"[^a-z0-9æøå]", "", parts[-1].lower())
+        if last and (last == re.sub(r"[^a-z0-9æøå]", "", site_name.lower()) or len(label) >= 3 and (label in last or
+                     strip_accents_no(last) == label or last in label)):
+            return " – ".join(parts[:-1]).strip()
+    return title
+
+
+def _menu_urls(page: Page) -> set[str]:
+    """Pages linked from the site's navigation and header, or from a home-page tile whose label is a short page name
+    ("Bading", "Priser"): menu entries, not posts."""
+    nav = {l["url"].rstrip("/").lower() for l in page.links if l["url"].startswith("http") and l.get("zone") in ("nav", "header")}
+    tiles = {l["url"].rstrip("/").lower() + "\t" + " ".join(l["text"].lower().split()) for l in page.links
+             if l["url"].startswith("http") and 0 < len((l["text"] or "").split()) <= 3}
+    return nav | tiles
+
+
+def news_rejection(item: dict, domain: str, menu: set[str]) -> str | None:
+    """Why a dated item is not a real post (menu entry, product or taxonomy page, demo or placeholder content), or None."""
+    parts = urllib.parse.urlsplit(item.get("url") or "")
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not host:
+        return "no_article_url"
+    if registered_domain(host) != domain and not any(host == h or host.endswith("." + h) for h in NEWSROOM_HOSTS):
+        return "link_leaves_company_site"
+    if parts.path.strip("/") == "" or parts.path.rstrip("/").lower() in ("/nb", "/no", "/en", "/index.php", "/blog", "/nyheter", "/news", "/aktuelt"):
+        return "site_or_section_root_not_a_post"
+    url_key = item["url"].rstrip("/").lower()
+    if not DATE_IN_URL.search(parts.path + "/") and (url_key in menu or url_key + "\t" + " ".join((item.get("title") or "").lower().split()) in menu):
+        return "menu_entry"
+    if NOT_ARTICLE_PATH.search(parts.path) or re.search(r"\.(jpe?g|png|gif|webp|svg|pdf|mp4|mp3|zip|docx?|xlsx?)$", parts.path, re.I):
+        return "product_or_listing_page"
+    if junk_news_title(item.get("title") or ""):
+        return "demo_or_placeholder_post"
+    return None
 
 
 def _dedupe_news(items: list[dict]) -> list[dict]:
@@ -972,12 +1269,41 @@ def _dedupe_news(items: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
-def _publish_news(items: list[dict], ledger: Ledger) -> None:
+def _publish_news(ctx: dict, items: list[dict], ledger: Ledger, domain: str, menu: set[str] | None = None) -> None:
+    """Dated posts from the company's own site or newsroom, newest first; menu entries, product pages, demo posts,
+    mass-duplicated titles and editorial content of news publishers are left out."""
     today = datetime.utcnow().date().isoformat()
-    published = 0
+    if str(ctx.get("industry_code") or "").startswith(EDITORIAL_NACE):
+        ledger.mark("company_news", "not_available", "the company is a news publisher: its articles are editorial content, not news about the company")
+        return
+    titles: dict[str, int] = {}
+    for item in items:
+        key = re.sub(r"\W+", " ", (item.get("title") or "").lower()).strip()
+        titles[key] = titles.get(key, 0) + 1
+    published, seen_titles, rejected = 0, set(), []
+    # a hacked site: spam posts (casino, betting, pills) injected among the company's own; trust none of its dated items
+    spam_site = sum(bool(SPAM_TITLE.search(i.get("title") or "")) for i in items) >= 2
+    # a feed that lists pages ("Priser", "Bading", "Kano") rather than posts: one-word titles without a dated permalink
+    page_feed = sum(len((i.get("title") or "").split()) == 1 and not DATE_IN_URL.search(urllib.parse.urlsplit(i["url"]).path + "/")
+                    for i in items) >= 3
     for item in sorted([i for i in items if i.get("date")], key=lambda i: i["date"], reverse=True):
-        if item["date"] > today or item["date"] < "2000-01-01" or DEFAULT_POSTS.match((item.get("title") or "").strip()):
+        if item["date"] > today or item["date"] < "2000-01-01":
             continue
+        item["title"] = clean_news_title(item.get("title") or "", item["url"])
+        key = re.sub(r"\W+", " ", item["title"].lower()).strip()
+        why = news_rejection(item, domain, menu or set())
+        if not why and spam_site:
+            why = "spam_injected_into_site"
+        if not why and page_feed and len(item["title"].split()) <= 2 and not DATE_IN_URL.search(urllib.parse.urlsplit(item["url"]).path + "/"):
+            why = "page_not_post"
+        if not why and titles.get(key, 0) >= 3:
+            why = "same_title_repeated_in_feed"
+        if not why and key in seen_titles:
+            continue
+        if why:
+            rejected.append({"url": item["url"], "title": item["title"][:120], "reason": why})
+            continue
+        seen_titles.add(key)
         visit = item.get("visit")
         snap = visit.snap if visit else item["snap"]
         ev = ledger.add_evidence(snap, source_class="company_owned_website", method=item.get("method", "article_page"),
@@ -987,5 +1313,8 @@ def _publish_news(items: list[dict], ledger: Ledger) -> None:
         published += 1
         if published >= 10:
             break
+    if rejected:
+        ctx["news_excluded"] = rejected[:12]
     if not published:
-        ledger.mark("company_news", "not_available", "no dated news items found on verified site")
+        ledger.mark("company_news", "not_available", "no dated posts found on verified site" if not rejected else
+                    "dated items on the verified site are menu entries, product pages or placeholder posts, not news")

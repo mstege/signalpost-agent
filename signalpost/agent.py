@@ -209,6 +209,9 @@ def assemble(org: str, ledger: Ledger, ctx: dict, *, run_id: str, started: str, 
         "identity_resolution": {
             "website_candidates": ctx.get("website_candidates", []),
             "ambiguous_sites": ctx.get("ambiguous_sites", []),
+            **({"group_site": ctx["group_site"]} if ctx.get("group_site") else {}),
+            **({"social_links_excluded": ctx["social_excluded"]} if ctx.get("social_excluded") else {}),
+            **({"news_items_excluded": ctx["news_excluded"]} if ctx.get("news_excluded") else {}),
             "rule": "publish a website only with page-level proof tied to the organisation number, registry phone/e-mail, "
                     "or the registry-declared domain plus the legal name; name similarity alone abstains",
         },

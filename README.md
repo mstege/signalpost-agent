@@ -66,10 +66,10 @@ Tests (offline): `python3 -m unittest discover -s tests`
    e-mail domain (free-mail domains excluded), subunit websites, and domains derived from the
    legal name, former names and subunit names. DNS-filtered, then fetched (robots.txt respected).
 4. **Identity gate** — see below. Failing candidates are recorded with the reason.
-5. **Company-owned extraction** on the verified site (≤ ~16 pages): social profiles linked by
-   the site, contact e-mail/phone, visiting addresses, public brand, self-description,
+5. **Company-owned extraction** on the verified site (≤ ~16 pages): social profiles that belong
+   to the company, contact e-mail/phone, visiting addresses, public brand, self-description,
    registered leaders confirmed on the site, named people with titles, careers pages and job
-   links, dated news (RSS/Atom, article metadata, dated URLs).
+   links, dated posts (RSS/Atom, article metadata, dated URLs). See the ownership rules below.
 6. **Jobs from NAV** — the public NAV job feed (arbeidsplassen.nav.no). The run walks the feed of
    active ads once; for each company it fetches the details of at most 30 ads whose employer name
    resembles the company or one of its registered subunits, and matches an ad only through the
@@ -122,6 +122,40 @@ a registered name that the page pairs with a different organisation number, hold
 appear only on the operating company's site, housing cooperatives / foundations / co-ownerships
 on a manager's domain, and name-only matches. It is better to miss a site than to publish
 another company's facts.
+
+## Company-owned content (social profiles, news, jobs)
+
+**Group, parent and sister-company sites.** A verified site can still belong to the group: the
+footer of a group site often lists each subsidiary's organisation number. The site counts as a
+group site when its copyright line names another organisation number (and not ours), when its
+title, site name, JSON-LD organisation or copyright line name another legal entity while ours is
+absent there, when the site's brand is the leading part of our name followed by a country or
+unit word ("tamigo" for TAMIGO NORGE AS, "Skeidar" for SKEIDAR SUPPLY CHAIN AS), or when a
+non-.no site serves four or more languages. The website is published with
+`relation: "group_site"` and the owner in the note; **no social profiles, news or jobs are taken
+from it** (NAV jobs matched by organisation number still are). Contact details and addresses on
+the page are kept.
+
+**Social profiles.** A profile counts only when it is the `sameAs` of the site's own JSON-LD
+organisation, or when its handle matches the company: the legal or former name (with or without
+generic words), the domain label, the public brand, a distinctive name word, the initials of the
+name, or a close spelling variant. Opaque numeric ids count only when the link text names the
+company. Links to theme or platform vendors (Wix, Squarespace, …), agencies, clients, chains and
+employees do not match and are listed under `identity_resolution.social_links_excluded`.
+
+**News.** Only real dated posts: the date must be a publication date (RSS `pubDate`, Atom
+`published`, `article:published_time`, JSON-LD `datePublished`, a `<time>` marked as published,
+a dated permalink, the date on the news index card, or a date printed in the article header right
+after the post title or after "Publisert") – never Atom `updated`, modification times, dates
+labelled "Oppdatert" or dates further down in running text. Items are dropped when they are navigation entries, the site or a
+section root, product, shop, category or tag pages, theme demo or placeholder posts ("Sample
+Post", lorem ipsum, "Hello world"), spam injected into a hacked site (casino, betting – then no
+item of that feed is trusted), feeds that list pages instead of posts, or one title repeated three
+or more times. Careers pages are matched only as their own path segment ("/karriere",
+"/ledige-stillinger"), never inside an article slug. Posts must stay on
+the company's domain or its newsroom (Mynewsdesk, Cision, NTB, Newsweb). News publishers
+(NACE 58.12–58.14, 60, 63.91; SN2007 and SN2025 codes) get no company news, because their articles are editorial content.
+Dropped items are listed under `identity_resolution.news_items_excluded`.
 
 ## Envelope
 

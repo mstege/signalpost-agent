@@ -14,7 +14,8 @@ from signalpost.net import Snapshot, check_url, UrlPolicyError
 from signalpost.page import Page
 from signalpost.refresh import diff
 from signalpost.synthesis import build_synthesis, derived_metrics, key_points
-from signalpost.website import SiteVisit, _proof, _extract, _publish_registry_declared
+from signalpost.website import (SiteVisit, _article_date, _extract, _links_for, _name_keys, _parse_feed, _proof, _publish_news,
+                                _publish_registry_declared, site_scope, social_owner, strip_site_suffix)
 
 ORG = "810034882"
 
@@ -288,6 +289,152 @@ class ExtractionTest(unittest.TestCase):
         self.assertEqual(fields["public_brand"], ["Sandnes Elektriske"])
         for claim in ledger.claims.values():
             self.assertTrue(claim["evidence_ids"])
+
+
+def _fields(ledger: Ledger) -> dict:
+    out: dict = {}
+    for claim in ledger.claims.values():
+        out.setdefault(claim["field"], []).append(claim["value"])
+    return out
+
+
+class AuditGroupSiteTest(unittest.TestCase):
+    """Audit 1: a group, parent or sister company's site gives no social profiles, news or jobs."""
+
+    def test_copyright_with_other_orgnr_is_group_site(self):
+        html = """<html lang='no'><head><title>Møbler hos Skeidar</title></head><body><footer>
+        <a href='https://www.instagram.com/skeidarnorge/'>Instagram</a> © 2000-2026 SkeidarLivingGroup AS · Org.nr. 915 920 020</footer></body></html>"""
+        scope = site_scope(ctx(legal_name="SKEIDAR SUPPLY CHAIN AS", organisation_number="970971165"), visit("https://www.skeidar.no/", html))
+        self.assertEqual(scope["reason"], "owner_line_names_other_organisation_number")
+        self.assertIn("915920020", scope["owner"])
+
+    def test_parent_brand_with_country_suffix_is_group_site(self):
+        html = """<html lang='en'><head><title>Workforce Management Software - tamigo</title></head><body>
+        <footer>tamigo Norge AS Org nr.: NO 987 029 781 MVA ©️ tamigo 2026</footer></body></html>"""
+        scope = site_scope(ctx(legal_name="TAMIGO NORGE AS", organisation_number="987029781"), visit("https://www.tamigo.com/no/", html))
+        self.assertEqual(scope["reason"], "site_of_parent_brand")
+
+    def test_own_site_and_parent_named_group_are_not_group_sites(self):
+        own = """<html lang='no'><head><title>Assemblin AS - Assemblin</title></head><body>© Assemblin</body></html>"""
+        self.assertIsNone(site_scope(ctx(legal_name="ASSEMBLIN AS"), visit("https://www.assemblin.com/no/", own)))
+        parent = """<html lang='en'><head><title>Expology</title></head><body>© 2026 Expology</body></html>"""
+        self.assertIsNone(site_scope(ctx(legal_name="EXPOLOGY EXPERIENCE GROUP AS"), visit("https://www.expology.com/", parent)))
+        plain = """<html lang='no'><head><meta property='og:site_name' content='Sandnes Elektriske'></head><body>© 2026 Sandnes Elektriske AS</body></html>"""
+        self.assertIsNone(site_scope(ctx(), visit("https://sandneselektriske.no/", plain)))
+
+    def test_group_site_extracts_no_socials_or_jobs(self):
+        html = """<html lang='no'><head><title>Gunnar Ruud Catering</title></head><body>
+        <a href='https://www.facebook.com/GunnarRuudCatering'>Facebook</a><a href='https://jobylon.com/jobs/12345-kokk'>Kokk til kjøkkenet</a>
+        <a href='mailto:post@gunnarruud.no'>post@gunnarruud.no</a></body></html>"""
+        v = visit("https://www.gunnarruud.no/", html)
+        ledger = Ledger(ORG)
+        site = {"domain": "gunnarruud.no", "home": "https://www.gunnarruud.no/", "group": {"reason": "x", "owner": "Gunnar Ruud Catering AS"}}
+        _extract(ctx(legal_name="GUNNAR RUUD EIENDOM AS"), site, [v], {"home": [v]}, ledger)
+        fields = _fields(ledger)
+        self.assertNotIn("social_profile", fields)
+        self.assertNotIn("job_posting", fields)
+        self.assertIn("post@gunnarruud.no", fields["contact_email"])
+
+
+class AuditSocialOwnershipTest(unittest.TestCase):
+    """Audit 2: a social profile counts only when it matches the company's name, brand or domain, or is its JSON-LD sameAs."""
+
+    def test_handles(self):
+        def owner(legal, domain, handle, brand=None, text=""):
+            return social_owner(_name_keys(ctx(legal_name=legal), {"domain": domain}, brand), handle, text)
+        self.assertTrue(owner("GLADE NOMADE AS", "gladenomade.no", "gladenomade"))
+        self.assertTrue(owner("AKERSHUS CAR SENTER AS", "akershuscarsenter.no", "ACS.no"))
+        self.assertTrue(owner("HWA AS", "hwa.no", "bygghwa"))
+        self.assertTrue(owner("INDERØYNINGEN AS", "inderoyningen.no", "@inderyningen"))
+        self.assertTrue(owner("NORCOM MOBIL & IT AS", "bedriftsabonnement.no", "Bedriftsabonnement"))
+        self.assertTrue(owner("NAMDAL CATERING AS", "namdalcatering.no", "Namdal-Catering-as-1775400566034704"))
+        self.assertIsNone(owner("FLASNES CONSULTING SERVICES AS", "flasnesconsulting.no", "wix"))
+        self.assertIsNone(owner("ABSOLUTTWEB AS", "absoluttweb.no", "villakildal"))
+        self.assertIsNone(owner("THE HIDDEN NORTH AS", "thehiddennorth.com", "emmainthenorth"))
+        self.assertIsNone(owner("SANDVIKA VVS SENTER AS", "sandvikavvssenter.no", "RorleggerkjedenVB"))
+        self.assertIsNone(owner("ØYA SHIPPING AS", "oyashipping.no", "61584954875860"))
+        self.assertTrue(owner("ØYA SHIPPING AS", "oyashipping.no", "61584954875860", text="Øya Shipping på Facebook"))
+
+    def test_footer_links_of_agency_theme_and_staff_are_excluded_sameas_is_kept(self):
+        html = """<html lang='no'><head><meta property='og:site_name' content='Sandnes Elektriske'>
+        <script type='application/ld+json'>{"@type": "Organization", "name": "Sandnes Elektriske AS", "url": "https://sandneselektriske.no/",
+        "sameAs": ["https://www.linkedin.com/company/1234567/"]}</script></head><body>
+        <a href='https://www.facebook.com/sandneselektriske'>Facebook</a>
+        <footer><a href='https://www.instagram.com/wix/'>Wix</a> Nettside av <a href='https://www.facebook.com/webbyraaet'>Webbyrået</a>
+        <a href='https://twitter.com/olanordmann'>Ola</a></footer></body></html>"""
+        v = visit("https://sandneselektriske.no/", html)
+        ledger = Ledger(ORG)
+        c = ctx()
+        _extract(c, {"domain": "sandneselektriske.no", "home": "https://sandneselektriske.no/"}, [v], {"home": [v]}, ledger)
+        urls = sorted(s["url"] for s in _fields(ledger)["social_profile"])
+        self.assertEqual(urls, ["https://www.facebook.com/sandneselektriske", "https://www.linkedin.com/company/1234567/"])
+        self.assertEqual(len(c["social_excluded"]), 3)
+
+
+class AuditNewsTest(unittest.TestCase):
+    """Audit 3: only real dated posts – publication dates, no menu entries, product pages, demo or duplicated items."""
+
+    FEED = """<?xml version='1.0'?><rss><channel>
+    <item><title>Ny fossilfri lastebil</title><link>https://hagentransport.no/nyheter/ny-fossilfri-lastebil/</link><pubDate>Tue, 16 Sep 2025 10:00:00 +0000</pubDate></item>
+    <item><title>Priser</title><link>https://hagentransport.no/priser/</link><pubDate>Tue, 11 May 2021 10:00:00 +0000</pubDate></item>
+    <item><title>Sample Post #1</title><link>https://hagentransport.no/sample-post-1/</link><pubDate>Thu, 30 Nov 2023 10:00:00 +0000</pubDate></item>
+    <item><title>Praesent Et Urna Turpis</title><link>https://hagentransport.no/praesent/</link><pubDate>Tue, 31 Jul 2012 10:00:00 +0000</pubDate></item>
+    <item><title>Henger 750 kg</title><link>https://hagentransport.no/produkt/henger-750/</link><pubDate>Tue, 01 Jul 2025 10:00:00 +0000</pubDate></item>
+    <item><title>Coronavirus disease 2019</title><link>https://hagentransport.no/c-1/</link><pubDate>Mon, 19 Oct 2026 10:00:00 +0000</pubDate></item>
+    <item><title>Coronavirus disease 2019</title><link>https://hagentransport.no/c-2/</link><pubDate>Tue, 20 Oct 2026 10:00:00 +0000</pubDate></item>
+    <item><title>Coronavirus disease 2019</title><link>https://hagentransport.no/c-3/</link><pubDate>Wed, 21 Oct 2026 10:00:00 +0000</pubDate></item>
+    <item><title>Prosjekter</title><link>https://hagentransport.no/</link><pubDate>Wed, 01 Oct 2025 10:00:00 +0000</pubDate></item>
+    </channel></rss>"""
+    ATOM = """<?xml version='1.0'?><feed xmlns='http://www.w3.org/2005/Atom'><entry><title>Om oss</title>
+    <link href='https://hagentransport.no/om-oss/'/><updated>2026-10-01T10:00:00Z</updated></entry></feed>"""
+
+    def test_feed_filters(self):
+        snap = Snapshot("https://hagentransport.no/feed/", "https://hagentransport.no/feed/", 200, "t", text=self.FEED)
+        items = _parse_feed(snap, "hagentransport.no")
+        ledger = Ledger(ORG)
+        c = ctx(legal_name="HAGEN TRANSPORT AS")
+        _publish_news(c, items, ledger, "hagentransport.no", menu={"https://hagentransport.no/priser"})
+        self.assertEqual([n["title"] for n in _fields(ledger)["company_news"]], ["Ny fossilfri lastebil"])
+        reasons = {x["reason"] for x in c["news_excluded"]}
+        self.assertEqual(reasons, {"menu_entry", "demo_or_placeholder_post", "product_or_listing_page", "same_title_repeated_in_feed",
+                                   "site_or_section_root_not_a_post"})
+
+    def test_atom_updated_is_not_a_publication_date(self):
+        snap = Snapshot("https://hagentransport.no/feed/", "https://hagentransport.no/feed/", 200, "t", text=self.ATOM)
+        self.assertEqual(_parse_feed(snap, "hagentransport.no"), [])
+
+    def test_article_date_ignores_modified_and_running_text(self):
+        page = Page("https://x.no/nyheter/a", """<html><head><meta property='article:modified_time' content='2026-10-01'></head>
+        <body><time class='updated' datetime='2026-10-02'>2. oktober 2026</time><p>Åpent 3. oktober 2026</p></body></html>""")
+        self.assertEqual(_article_date(page), (None, None))
+        page = Page("https://x.no/nyheter/a", """<html><body><time class='entry-date published' datetime='2025-03-01'>1. mars 2025</time></body></html>""")
+        self.assertEqual(_article_date(page)[0], "2025-03-01")
+
+    def test_hacked_site_spam_and_titles(self):
+        feed = self.FEED.replace("Ny fossilfri lastebil", "Pinco casino Türkiye’de – kayıt ve giriş").replace("Priser", "Melbet APK download")
+        snap = Snapshot("https://hagentransport.no/feed/", "https://hagentransport.no/feed/", 200, "t", text=feed)
+        ledger = Ledger(ORG)
+        _publish_news(ctx(), _parse_feed(snap, "hagentransport.no"), ledger, "hagentransport.no")
+        self.assertNotIn("company_news", _fields(ledger))
+        from signalpost.website import junk_news_title
+        self.assertTrue(junk_news_title("Hei, verden!") and junk_news_title("Proin Sodales Quam Nec Sollicit"))
+        self.assertFalse(junk_news_title("Godt nytt år!"))
+        self.assertEqual(strip_site_suffix("Hjelper Steinkjer-bedriften å vokse - Sirius Økonomi", "sirius-okonomi.no"),
+                         "Hjelper Steinkjer-bedriften å vokse")
+        self.assertEqual(strip_site_suffix("Fred. Olsen 1848 - BRIZO", "fredolsen1848.com"), "Fred. Olsen 1848 - BRIZO")
+
+    def test_careers_link_is_a_path_segment_not_an_article_slug(self):
+        page = Page("https://avisa-st.no/", """<a href='/nyheter/n/kv/audun-35-faar-ny-toppjobb'>Audun får ny toppjobb</a>
+        <a href='/kundeservice/bestilling'>Bestilling</a><a href='/om-oss/ledige-stillinger/'>Ledige stillinger</a>
+        <a href='/tannstillingsfeil/'>Tannstillingsfeil</a><a href='/slik-jobber-vi/'>Slik jobber vi</a><a href='/ledig-stilling/'>Vi søker</a>""")
+        self.assertEqual(_links_for(page, "avisa-st.no", "careers"), ["https://avisa-st.no/ledig-stilling/", "https://avisa-st.no/om-oss/ledige-stillinger/"])
+
+    def test_news_publisher_articles_are_not_company_news(self):
+        snap = Snapshot("https://avisa-st.no/feed", "https://avisa-st.no/feed", 200, "t", text=self.FEED.replace("hagentransport.no", "avisa-st.no"))
+        ledger = Ledger(ORG)
+        _publish_news(ctx(industry_code="58.130"), _parse_feed(snap, "avisa-st.no"), ledger, "avisa-st.no")
+        self.assertNotIn("company_news", _fields(ledger))
+        self.assertIn("news publisher", ledger.field_states["company_news"]["reason"])
 
 
 def _ledger_with(values: dict) -> Ledger:
